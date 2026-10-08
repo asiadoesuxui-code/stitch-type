@@ -149,49 +149,237 @@ export function measureTextWidth(
   return ctx.measureText(text).width;
 }
 
+type PlayCache = {
+  width: number;
+  height: number;
+  sewFrom: number;
+  settled: HTMLCanvasElement;
+  active: HTMLCanvasElement;
+  drawn: number;
+};
+
+export type EmbroideryScene = {
+  fabric: string;
+  marks: SewMark[];
+  play?: PlayCache;
+};
+
+type NeedlePose = {
+  x: number;
+  y: number;
+  angle: number;
+  sink: number;
+  length: number;
+  upright?: boolean;
+  entry?: Point;
+  exit?: Point;
+};
+
+type SewMark = {
+  charIndex: number;
+  weight: number;
+  draw: (ctx: CanvasRenderingContext2D, amount: number) => void;
+  needle?: (amount: number) => NeedlePose;
+};
+
+export function buildEmbroideryScene(
+  width: number,
+  height: number,
+  options: EmbroideryOptions,
+): EmbroideryScene {
+  const fabric = options.fabric;
+  if (width < 2 || height < 2) return { fabric, marks: [] };
+
+  const text = options.text.trim();
+  if (!text) return { fabric, marks: [] };
+
+  const clothDark = luminance(fabric) < 0.42;
+  const rng = mulberry32(hashString(`${text}:${options.stitch}`));
+  const marks: SewMark[] = [];
+
+  if (options.stitch === "cross") {
+    collectCross(marks, width, height, options, clothDark, rng);
+    return { fabric, marks };
+  }
+
+  const layout = measureWord(text, options.fontFamily, width, height, options.insetBottom);
+  const ranges = charRanges(
+    text,
+    options.fontFamily,
+    width / 2 - layout.textWidth / 2,
+    width / 2 + layout.textWidth / 2,
+    layout.fontSize,
+    layout.letterSpacing,
+  );
+  const mask = rasterizeText(text, options, width, height);
+  if (!mask) return { fabric, marks };
+
+  if (options.stitch === "satin") {
+    collectSatin(marks, mask, options, clothDark, ranges);
+    return { fabric, marks };
+  }
+
+  if (options.stitch === "knot") {
+    collectKnots(marks, mask, options, clothDark, rng, ranges);
+    return { fabric, marks };
+  }
+
+  const contours = tidyContours(traceContours(mask.mask, mask.w, mask.h, mask.scale));
+  if (options.stitch === "running") collectRunning(marks, contours, options, clothDark, ranges);
+  if (options.stitch === "chain") collectChain(marks, contours, options, clothDark, rng, ranges);
+  if (options.stitch === "whipped") collectWhipped(marks, contours, options, clothDark, ranges);
+  return { fabric, marks };
+}
+
+export function drawEmbroideryScene(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  scene: EmbroideryScene,
+  sewFrom: number,
+  sewProgress: number,
+) {
+  if (width < 2 || height < 2) return;
+  drawFabric(ctx, width, height, scene.fabric);
+
+  const progress = Math.max(0, Math.min(1, sewProgress));
+  let activeWeight = 0;
+  const active: SewMark[] = [];
+  for (const mark of scene.marks) {
+    if (mark.charIndex >= sewFrom) {
+      activeWeight += mark.weight;
+      active.push(mark);
+    }
+  }
+  const target = progress >= 1 ? activeWeight : progress * activeWeight;
+  let consumed = 0;
+  let complete = 0;
+  let partial: { mark: SewMark; amount: number } | null = null;
+  let needle: NeedlePose | null = null;
+  for (const mark of active) {
+    const next = consumed + mark.weight;
+    if (target >= next - 0.0001) complete++;
+    else if (target > consumed + 0.0001) {
+      const amount = (target - consumed) / mark.weight;
+      partial = { mark, amount };
+      if (mark.needle) needle = mark.needle(amount);
+      break;
+    } else break;
+    consumed = next;
+  }
+
+  const dpr = ctx.getTransform().a || 1;
+  const play = playCache(scene, width, height, sewFrom, dpr);
+  const layer = play.active.getContext("2d");
+  if (layer) {
+    if (complete < play.drawn) {
+      layer.setTransform(1, 0, 0, 1, 0, 0);
+      layer.clearRect(0, 0, play.width, play.height);
+      layer.setTransform(dpr, 0, 0, dpr, 0, 0);
+      play.drawn = 0;
+    }
+    for (let i = play.drawn; i < complete; i++) active[i].draw(layer, 1);
+    play.drawn = complete;
+  }
+
+  ctx.drawImage(play.settled, 0, 0, width, height);
+  ctx.drawImage(play.active, 0, 0, width, height);
+  if (partial) partial.mark.draw(ctx, partial.amount);
+  if (needle && progress < 1) drawNeedle(ctx, needle, luminance(scene.fabric) < 0.42);
+}
+
+function playCache(
+  scene: EmbroideryScene,
+  width: number,
+  height: number,
+  sewFrom: number,
+  dpr: number,
+) {
+  const w = Math.max(1, Math.round(width * dpr));
+  const h = Math.max(1, Math.round(height * dpr));
+  const existing = scene.play;
+  if (
+    existing &&
+    existing.width === w &&
+    existing.height === h &&
+    existing.sewFrom === sewFrom
+  ) {
+    return existing;
+  }
+
+  const make = () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    canvas.getContext("2d")?.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return canvas;
+  };
+  const settled = make();
+  const settledCtx = settled.getContext("2d");
+  if (settledCtx) {
+    for (const mark of scene.marks) {
+      if (mark.charIndex < sewFrom) mark.draw(settledCtx, 1);
+    }
+  }
+  const active = make();
+  const play = { width: w, height: h, sewFrom, settled, active, drawn: 0 };
+  scene.play = play;
+  return play;
+}
+
+export function sceneSewWeight(scene: EmbroideryScene, from: number) {
+  let total = 0;
+  for (const mark of scene.marks) {
+    if (mark.charIndex >= from) total += mark.weight;
+  }
+  return total;
+}
+
+export function sewDurationFor(weight: number) {
+  if (weight <= 0) return 0;
+  // Weight counts every thread. A filled letter is hundreds of weight, which
+  // used to run for up to 16s. Same stitch order, short enough to keep up
+  // with typing: a letter finishes in well under a second.
+  return Math.max(180, Math.min(640, weight * 36));
+}
+
 export function paintEmbroidery(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
   options: EmbroideryOptions,
 ) {
-  if (width < 2 || height < 2) return;
-
-  drawFabric(ctx, width, height, options.fabric);
-
-  const text = options.text.trim();
-  if (!text) return;
-
-  const clothDark = luminance(options.fabric) < 0.42;
-  const rng = mulberry32(hashString(`${text}:${options.stitch}`));
-
-  if (options.stitch === "cross") {
-    drawCrossStitch(ctx, width, height, options, clothDark, rng);
-    return;
-  }
-
-  const mask = rasterizeText(text, options, width, height);
-  if (!mask) return;
-
-  if (options.stitch === "satin") {
-    drawSatin(ctx, mask, options, clothDark);
-    return;
-  }
-
-  if (options.stitch === "knot") {
-    drawKnots(ctx, mask, options, clothDark, rng);
-    return;
-  }
-
-  const contours = tidyContours(
-    traceContours(mask.mask, mask.w, mask.h, mask.scale),
-  );
-  if (options.stitch === "running") drawRunning(ctx, contours, options, clothDark);
-  if (options.stitch === "chain") drawChain(ctx, contours, options, clothDark, rng);
-  if (options.stitch === "whipped") drawWhipped(ctx, contours, options, clothDark);
+  const scene = buildEmbroideryScene(width, height, options);
+  drawEmbroideryScene(ctx, width, height, scene, options.text.trim().length, 1);
 }
 
+let fabricLayer: { key: string; canvas: HTMLCanvasElement } | null = null;
+
 function drawFabric(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  color: string,
+) {
+  const dpr = ctx.getTransform().a || 1;
+  const w = Math.max(1, Math.round(width * dpr));
+  const h = Math.max(1, Math.round(height * dpr));
+  const key = `${w}x${h}:${color}`;
+  if (!fabricLayer || fabricLayer.key !== key) {
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const layer = canvas.getContext("2d");
+    if (layer) {
+      layer.setTransform(dpr, 0, 0, dpr, 0, 0);
+      paintFabric(layer, width, height, color);
+    }
+    fabricLayer = { key, canvas };
+  }
+  ctx.drawImage(fabricLayer.canvas, 0, 0, width, height);
+}
+
+function paintFabric(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
@@ -355,14 +543,18 @@ function crossChart(
 
   const gridW = cols * cell;
   const gridH = rows * cell;
+  const ox = (width - gridW) / 2;
+  const hasInk = maxCol >= minCol;
   return {
     cell,
     cols,
     rows,
     pixels,
-    ox: (width - gridW) / 2,
+    ox,
     oy: (height - insetBottom - gridH) / 2,
-    textWidth: maxCol >= minCol ? (maxCol - minCol + 1) * cell : 0,
+    textWidth: hasInk ? (maxCol - minCol + 1) * cell : 0,
+    spanStart: hasInk ? ox + minCol * cell : ox,
+    spanEnd: hasInk ? ox + (maxCol + 1) * cell : ox,
   };
 }
 
@@ -386,8 +578,8 @@ export function visibleTextWidth(
   return measureWord(sample, fontFamily, width, height, insetBottom).textWidth;
 }
 
-function drawCrossStitch(
-  ctx: CanvasRenderingContext2D,
+function collectCross(
+  marks: SewMark[],
   width: number,
   height: number,
   options: EmbroideryOptions,
@@ -404,8 +596,19 @@ function drawCrossStitch(
   );
   if (!chart) return;
 
-  const { cell, cols, rows, pixels, ox, oy } = chart;
+  const { cell, cols, rows, pixels, ox, oy, spanStart, spanEnd } = chart;
+  const ranges = charRanges(options.text.trim(), options.fontFamily, spanStart, spanEnd, 100, 2);
   const threadW = Math.max(1.1, cell * 0.16);
+  const reach = cell * 2.5;
+
+  type CrossCell = {
+    tl: Point;
+    tr: Point;
+    bl: Point;
+    br: Point;
+    charIndex: number;
+  };
+  const byRow = new Map<number, CrossCell[]>();
 
   for (let y = 0; y < rows; y++) {
     for (let x = 0; x < cols; x++) {
@@ -414,35 +617,78 @@ function drawCrossStitch(
       const top = oy + y * cell;
       const pad = cell * 0.1;
       const j = () => (rng() - 0.5) * 0.45;
-      drawThread(
-        ctx,
-        left + pad + j(),
-        top + pad + j(),
-        left + cell - pad + j(),
-        top + cell - pad + j(),
+      const tl = { x: left + pad + j(), y: top + pad + j() };
+      const tr = { x: left + cell - pad + j(), y: top + pad + j() };
+      const bl = { x: left + pad + j(), y: top + cell - pad + j() };
+      const br = { x: left + cell - pad + j(), y: top + cell - pad + j() };
+      const row = byRow.get(y) ?? [];
+      row.push({ tl, tr, bl, br, charIndex: charIndexAt((tl.x + br.x) / 2, ranges) });
+      byRow.set(y, row);
+    }
+  }
+
+  const rowKeys = [...byRow.keys()].sort((a, b) => a - b);
+  let carry: Point | null = null;
+  for (const key of rowKeys) {
+    const cells = byRow.get(key);
+    if (!cells?.length) continue;
+    if (carry && distance(carry, cells[0].tl) <= reach) {
+      pushUnder(marks, carry.x, carry.y, cells[0].tl.x, cells[0].tl.y, cells[0].charIndex, clothDark);
+    }
+
+    for (let i = 0; i < cells.length; i++) {
+      const cellMark = cells[i];
+      pushThread(
+        marks,
+        ranges,
+        cellMark.tl.x,
+        cellMark.tl.y,
+        cellMark.br.x,
+        cellMark.br.y,
         options.accent,
         threadW * 0.92,
         clothDark,
       );
-      drawThread(
-        ctx,
-        left + pad + j(),
-        top + cell - pad + j(),
-        left + cell - pad + j(),
-        top + pad + j(),
+      const next = cells[i + 1];
+      if (next && distance(cellMark.br, next.tl) <= reach) {
+        pushUnder(marks, cellMark.br.x, cellMark.br.y, next.tl.x, next.tl.y, next.charIndex, clothDark);
+      }
+    }
+
+    const last = cells[cells.length - 1];
+    if (distance(last.br, last.tr) <= reach) {
+      pushUnder(marks, last.br.x, last.br.y, last.tr.x, last.tr.y, last.charIndex, clothDark);
+    }
+
+    for (let i = cells.length - 1; i >= 0; i--) {
+      const cellMark = cells[i];
+      pushThread(
+        marks,
+        ranges,
+        cellMark.tr.x,
+        cellMark.tr.y,
+        cellMark.bl.x,
+        cellMark.bl.y,
         options.thread,
         threadW,
         clothDark,
       );
+      const prev = cells[i - 1];
+      if (prev && distance(cellMark.bl, prev.tr) <= reach) {
+        pushUnder(marks, cellMark.bl.x, cellMark.bl.y, prev.tr.x, prev.tr.y, prev.charIndex, clothDark);
+      }
     }
+
+    carry = cells[0].bl;
   }
 }
 
-function drawSatin(
-  ctx: CanvasRenderingContext2D,
+function collectSatin(
+  marks: SewMark[],
   mask: Mask,
   options: EmbroideryOptions,
   clothDark: boolean,
+  ranges: Array<[number, number]>,
 ) {
   const box = bounds(mask.mask, mask.w, mask.h);
   if (!box) return;
@@ -454,6 +700,8 @@ function drawSatin(
   const ny = dx;
   const spacing = clampNum(2.4, 6.5, 3.5 * options.scale) * mask.scale;
   const width = (spacing / mask.scale) * 0.82;
+  const hop = (spacing / mask.scale) * 3.2;
+  const runs: Array<{ x1: number; y1: number; x2: number; y2: number; mx: number; my: number }> = [];
 
   const corners = [
     { x: box.minX, y: box.minY },
@@ -489,29 +737,63 @@ function drawSatin(
       if ((!on || s + 1 > maxS) && runStart !== null) {
         const end = on ? s : s - 1;
         if (end - runStart > 2) {
-          drawThread(
-            ctx,
-            (nx * t + dx * runStart) / mask.scale,
-            (ny * t + dy * runStart) / mask.scale,
-            (nx * t + dx * end) / mask.scale,
-            (ny * t + dy * end) / mask.scale,
-            options.thread,
-            width,
-            clothDark,
-          );
+          const x1 = (nx * t + dx * runStart) / mask.scale;
+          const y1 = (ny * t + dy * runStart) / mask.scale;
+          const x2 = (nx * t + dx * end) / mask.scale;
+          const y2 = (ny * t + dy * end) / mask.scale;
+          runs.push({ x1, y1, x2, y2, mx: (x1 + x2) / 2, my: (y1 + y2) / 2 });
         }
         runStart = null;
       }
     }
   }
+
+  const neighbor = (spacing / mask.scale) * 2.4;
+  const chains: Array<typeof runs> = [];
+  for (const run of runs) {
+    let best = -1;
+    let bestD = neighbor;
+    for (let i = 0; i < chains.length; i++) {
+      const last = chains[i][chains[i].length - 1];
+      const dist = Math.hypot(run.mx - last.mx, run.my - last.my);
+      if (dist < bestD) {
+        best = i;
+        bestD = dist;
+      }
+    }
+    if (best >= 0) chains[best].push(run);
+    else chains.push([run]);
+  }
+  chains.sort((a, b) => a[0].mx - b[0].mx || a[0].my - b[0].my);
+
+  for (const chain of chains) {
+    for (let i = 0; i < chain.length; i++) {
+      const run = chain[i];
+      const forward = i % 2 === 0;
+      const ax = forward ? run.x1 : run.x2;
+      const ay = forward ? run.y1 : run.y2;
+      const bx = forward ? run.x2 : run.x1;
+      const by = forward ? run.y2 : run.y1;
+      pushThread(marks, ranges, ax, ay, bx, by, options.thread, width, clothDark);
+      const next = chain[i + 1];
+      if (!next) continue;
+      const nextForward = i % 2 === 1;
+      const nx = nextForward ? next.x1 : next.x2;
+      const ny = nextForward ? next.y1 : next.y2;
+      if (Math.hypot(bx - nx, by - ny) <= hop) {
+        pushUnder(marks, bx, by, nx, ny, charIndexAt(nx, ranges), clothDark);
+      }
+    }
+  }
 }
 
-function drawKnots(
-  ctx: CanvasRenderingContext2D,
+function collectKnots(
+  marks: SewMark[],
   mask: Mask,
   options: EmbroideryOptions,
   clothDark: boolean,
   rng: () => number,
+  ranges: Array<[number, number]>,
 ) {
   const box = bounds(mask.mask, mask.w, mask.h);
   if (!box) return;
@@ -528,16 +810,62 @@ function drawKnots(
       const px = x + shift + (rng() - 0.5) * spacing * 0.22;
       const py = y + (rng() - 0.5) * spacing * 0.22;
       if (!inside(mask, px, py)) continue;
-      drawKnot(
-        ctx,
-        px,
-        py,
-        spacing * 0.42,
-        options.thread,
-        options.accent,
-        clothDark,
-        rng,
-      );
+      const radius = spacing * 0.42;
+      const turn = rng() * Math.PI * 2;
+      const charIndex = charIndexAt(px, ranges);
+      marks.push({
+        charIndex,
+        weight: 4.8,
+        draw(ctx, amount) {
+          if (amount >= 1) {
+            drawKnot(ctx, px, py, radius, options.thread, options.accent, clothDark, turn);
+            return;
+          }
+          const emerge = 0.16;
+          const wrapEnd = 0.68;
+          if (amount <= emerge) return;
+          if (amount < wrapEnd) {
+            const u = (amount - emerge) / (wrapEnd - emerge);
+            drawCoil(ctx, px, py, radius * 0.95, u * 1.7, options.thread, turn, clothDark);
+            return;
+          }
+          const u = (amount - wrapEnd) / (1 - wrapEnd);
+          ctx.save();
+          if (u < 0.82) {
+            ctx.globalAlpha = 1 - Math.max(0, (u - 0.35) / 0.47);
+            drawCoil(
+              ctx,
+              px,
+              py,
+              radius * (0.95 - 0.5 * u),
+              1.7,
+              options.thread,
+              turn,
+              clothDark,
+            );
+          }
+          if (u > 0.4) {
+            ctx.globalAlpha = Math.min(1, (u - 0.4) / 0.45);
+            drawKnot(ctx, px, py, radius, options.thread, options.accent, clothDark, turn);
+          }
+          ctx.restore();
+        },
+        needle(amount) {
+          let sink = 0;
+          if (amount < 0.16) sink = 1 - amount / 0.16;
+          else if (amount > 0.72) sink = Math.min(1, (amount - 0.72) / 0.28);
+          return {
+            x: px,
+            y: py,
+            angle: turn,
+            sink,
+            length: 12,
+            upright: true,
+            entry: { x: px, y: py },
+            exit: amount > 0.72 ? { x: px, y: py } : undefined,
+          };
+        },
+      });
     }
     row++;
   }
@@ -551,9 +879,8 @@ function drawKnot(
   thread: string,
   accent: string,
   clothDark: boolean,
-  rng: () => number,
+  turn: number,
 ) {
-  const turn = rng() * Math.PI * 2;
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(turn);
@@ -583,11 +910,12 @@ function drawKnot(
   ctx.restore();
 }
 
-function drawRunning(
-  ctx: CanvasRenderingContext2D,
+function collectRunning(
+  marks: SewMark[],
   contours: Point[][],
   options: EmbroideryOptions,
   clothDark: boolean,
+  ranges: Array<[number, number]>,
 ) {
   const dash = clampNum(7, 18, 12 * options.scale);
   const gap = dash * 0.62;
@@ -595,23 +923,43 @@ function drawRunning(
   const echo = 4.2 * options.scale;
 
   for (const contour of contours) {
-    forEachDash(contour, dash, gap, (a, b) => {
-      drawThread(ctx, a.x, a.y, b.x, b.y, options.thread, width, clothDark);
-    });
+    forEachDash(
+      contour,
+      dash,
+      gap,
+      (a, b) => {
+        pushThread(marks, ranges, a.x, a.y, b.x, b.y, options.thread, width, clothDark);
+      },
+      (a, b) => {
+        pushUnder(marks, a.x, a.y, b.x, b.y, charIndexAt((a.x + b.x) / 2, ranges), clothDark);
+      },
+    );
     const offset = offsetClosed(contour, echo);
-    forEachDash(offset, dash, gap, (a, b, index) => {
-      if (index % 2 === 0) return;
-      drawThread(ctx, a.x, a.y, b.x, b.y, options.accent, width * 0.9, clothDark);
-    });
+    forEachDash(
+      offset,
+      dash,
+      gap,
+      (a, b, index) => {
+        if (index % 2 === 0) {
+          pushUnder(marks, a.x, a.y, b.x, b.y, charIndexAt((a.x + b.x) / 2, ranges), clothDark);
+          return;
+        }
+        pushThread(marks, ranges, a.x, a.y, b.x, b.y, options.accent, width * 0.9, clothDark);
+      },
+      (a, b) => {
+        pushUnder(marks, a.x, a.y, b.x, b.y, charIndexAt((a.x + b.x) / 2, ranges), clothDark);
+      },
+    );
   }
 }
 
-function drawChain(
-  ctx: CanvasRenderingContext2D,
+function collectChain(
+  marks: SewMark[],
   contours: Point[][],
   options: EmbroideryOptions,
   clothDark: boolean,
   rng: () => number,
+  ranges: Array<[number, number]>,
 ) {
   const spacing = clampNum(7, 16, 11 * options.scale);
   const width = clampNum(1.2, 2.4, 1.55 * options.scale);
@@ -633,53 +981,98 @@ function drawChain(
       const ny = tx * side;
       const bulge = len * 0.78;
       const j = (rng() - 0.5) * 0.6;
-
-      ctx.beginPath();
-      ctx.moveTo(p.x, p.y);
-      ctx.bezierCurveTo(
-        p.x + tx * len * 0.2 + nx * bulge + j,
-        p.y + ty * len * 0.2 + ny * bulge,
-        q.x - tx * len * 0.05 + nx * bulge * 0.92,
-        q.y - ty * len * 0.05 + ny * bulge * 0.92,
-        q.x,
-        q.y,
-      );
-      ctx.bezierCurveTo(
-        q.x - tx * len * 0.35 + nx * bulge * 0.18,
-        q.y - ty * len * 0.35 + ny * bulge * 0.18,
-        p.x + tx * len * 0.25 + nx * bulge * 0.12,
-        p.y + ty * len * 0.25 + ny * bulge * 0.12,
-        p.x,
-        p.y,
-      );
-
-      ctx.strokeStyle = clothDark ? "rgba(0,0,0,0.45)" : "rgba(70,40,24,0.2)";
-      ctx.lineWidth = width + 1.1;
-      ctx.stroke();
-      ctx.strokeStyle = options.thread;
-      ctx.lineWidth = width;
-      ctx.stroke();
-
       const pin = 4.6 * options.scale;
-      drawThread(
-        ctx,
+      const charIndex = charIndexAt(p.x, ranges);
+      const c1 = {
+        x: p.x + tx * len * 0.2 + nx * bulge + j,
+        y: p.y + ty * len * 0.2 + ny * bulge,
+      };
+      const c2 = {
+        x: q.x - tx * len * 0.05 + nx * bulge * 0.92,
+        y: q.y - ty * len * 0.05 + ny * bulge * 0.92,
+      };
+      const c3 = {
+        x: q.x - tx * len * 0.35 + nx * bulge * 0.18,
+        y: q.y - ty * len * 0.35 + ny * bulge * 0.18,
+      };
+      const c4 = {
+        x: p.x + tx * len * 0.25 + nx * bulge * 0.12,
+        y: p.y + ty * len * 0.25 + ny * bulge * 0.12,
+      };
+      const loopAt = (u: number) =>
+        u <= 0.5
+          ? bezierPoint(p, c1, c2, q, u * 2)
+          : bezierPoint(q, c3, c4, p, (u - 0.5) * 2);
+      marks.push({
+        charIndex,
+        weight: Math.max(2.4, Math.min(3.6, len / 5)),
+        draw(ctx, amount) {
+          const paint = () => {
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y);
+            ctx.bezierCurveTo(c1.x, c1.y, c2.x, c2.y, q.x, q.y);
+            ctx.bezierCurveTo(c3.x, c3.y, c4.x, c4.y, p.x, p.y);
+            ctx.strokeStyle = clothDark ? "rgba(0,0,0,0.45)" : "rgba(70,40,24,0.2)";
+            ctx.lineWidth = width + 1.1;
+            ctx.lineCap = "round";
+            ctx.lineJoin = "round";
+            ctx.stroke();
+            ctx.strokeStyle = options.thread;
+            ctx.lineWidth = width;
+            ctx.stroke();
+          };
+          if (amount >= 1) {
+            paint();
+            return;
+          }
+          const phase = stabPhase(amount, true, true);
+          if (phase.t <= 0) return;
+          const tip = phase.sink > 0.22 && phase.t >= 1 ? 1 : Math.max(0.04, phase.t - 0.07);
+          const steps = Math.max(4, Math.round(18 * tip));
+          const points: Point[] = [];
+          for (let step = 0; step <= steps; step++) points.push(loopAt((step / steps) * tip));
+          strokeThread(ctx, points, options.thread, width, clothDark);
+        },
+        needle(amount) {
+          const phase = stabPhase(amount, true, true);
+          const point = loopAt(phase.t);
+          const ahead = loopAt(Math.min(1, phase.t + 0.04));
+          return {
+            x: point.x,
+            y: point.y,
+            angle: Math.atan2(ahead.y - point.y, ahead.x - point.x),
+            sink: phase.sink,
+            length: Math.min(14, Math.max(7, len * 0.55)),
+            entry: p,
+            exit: phase.t >= 1 && phase.sink > 0.04 ? p : undefined,
+          };
+        },
+      });
+      const tackEnd = { x: p.x + nx * pin, y: p.y + ny * pin };
+      pushThread(
+        marks,
+        ranges,
         p.x - nx * 0.4,
         p.y - ny * 0.4,
-        p.x + nx * pin,
-        p.y + ny * pin,
+        tackEnd.x,
+        tackEnd.y,
         options.accent,
         width * 1.15,
         clothDark,
       );
+      if (distance(tackEnd, q) < spacing * 3) {
+        pushUnder(marks, tackEnd.x, tackEnd.y, q.x, q.y, charIndexAt(q.x, ranges), clothDark);
+      }
     }
   }
 }
 
-function drawWhipped(
-  ctx: CanvasRenderingContext2D,
+function collectWhipped(
+  marks: SewMark[],
   contours: Point[][],
   options: EmbroideryOptions,
   clothDark: boolean,
+  ranges: Array<[number, number]>,
 ) {
   const stitch = clampNum(6, 14, 8 * options.scale);
   const baseW = clampNum(1.8, 3.6, 2.7 * options.scale);
@@ -687,11 +1080,21 @@ function drawWhipped(
   const whipLen = 7.2 * options.scale;
 
   for (const contour of contours) {
-    forEachDash(contour, stitch, 0, (a, b) => {
-      drawThread(ctx, a.x, a.y, b.x, b.y, options.thread, baseW, clothDark);
-    });
+    const segments: Array<{ a: Point; b: Point }> = [];
+    forEachDash(contour, stitch, 0, (a, b) => segments.push({ a, b }));
+    if (segments.length > 0) {
+      const first = segments[0];
+      pushThread(marks, ranges, first.a.x, first.a.y, first.b.x, first.b.y, options.thread, baseW, clothDark);
+      for (let i = 1; i < segments.length; i++) {
+        const prev = segments[i - 1];
+        const seg = segments[i];
+        pushUnder(marks, prev.b.x, prev.b.y, seg.b.x, seg.b.y, charIndexAt(seg.b.x, ranges), clothDark);
+        pushThread(marks, ranges, seg.b.x, seg.b.y, seg.a.x, seg.a.y, options.thread, baseW, clothDark);
+      }
+    }
 
     const pts = resampleClosed(contour, whipSpacing);
+    let prevEnd: Point | null = null;
     for (let i = 0; i < pts.length; i++) {
       const p = pts[i];
       const q = pts[(i + 1) % pts.length];
@@ -706,22 +1109,397 @@ function drawWhipped(
       const wlen = Math.hypot(wx, wy) || 1;
       const ux = wx / wlen;
       const uy = wy / wlen;
-      drawThread(
-        ctx,
-        p.x - ux * whipLen,
-        p.y - uy * whipLen,
-        p.x + ux * whipLen,
-        p.y + uy * whipLen,
-        options.accent,
-        baseW * 0.48,
-        clothDark,
-      );
+      const start = { x: p.x - ux * whipLen, y: p.y - uy * whipLen };
+      const end = { x: p.x + ux * whipLen, y: p.y + uy * whipLen };
+      if (prevEnd && distance(prevEnd, start) < whipLen * 5) {
+        pushUnder(marks, prevEnd.x, prevEnd.y, start.x, start.y, charIndexAt(start.x, ranges), clothDark);
+      }
+      pushThread(marks, ranges, start.x, start.y, end.x, end.y, options.accent, baseW * 0.48, clothDark);
+      prevEnd = end;
     }
 
     forEachDash(contour, stitch, 0, (a, b) => {
-      drawThread(ctx, a.x, a.y, b.x, b.y, options.thread, baseW * 0.42, clothDark);
+      pushThread(marks, ranges, a.x, a.y, b.x, b.y, options.thread, baseW * 0.42, clothDark, "glide");
     });
   }
+}
+
+function charRanges(
+  text: string,
+  fontFamily: string,
+  start: number,
+  end: number,
+  fontSize: number,
+  letterSpacing: number,
+): Array<[number, number]> {
+  if (!text) return [];
+  const total = measureTextWidth(text, fontFamily, fontSize, letterSpacing) || 1;
+  const span = end - start;
+  const ranges: Array<[number, number]> = [];
+  let prev = start;
+  for (let i = 0; i < text.length; i++) {
+    const prefix = measureTextWidth(text.slice(0, i + 1), fontFamily, fontSize, letterSpacing);
+    const right = i === text.length - 1 ? end : start + (prefix / total) * span;
+    ranges.push([prev, right]);
+    prev = right;
+  }
+  return ranges;
+}
+
+function charIndexAt(x: number, ranges: Array<[number, number]>) {
+  if (ranges.length <= 1) return 0;
+  for (let i = 0; i < ranges.length - 1; i++) {
+    if (x < ranges[i][1]) return i;
+  }
+  return ranges.length - 1;
+}
+
+function pushThread(
+  marks: SewMark[],
+  ranges: Array<[number, number]>,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  color: string,
+  width: number,
+  clothDark: boolean,
+  mode: "stab" | "glide" = "stab",
+) {
+  const pieces = cutSegment(x1, y1, x2, y2, ranges);
+  pieces.forEach((piece, index) => {
+    const lead = mode === "stab" && index === 0;
+    const tail = mode === "stab" && index === pieces.length - 1;
+    const dx = piece.x2 - piece.x1;
+    const dy = piece.y2 - piece.y1;
+    const len = Math.hypot(dx, dy) || 1;
+    const needleLen = Math.min(13, Math.max(6.5, len * 0.36));
+    marks.push({
+      charIndex: piece.charIndex,
+      weight: (mode === "glide" ? 0.38 : 1) * Math.max(0.45, Math.min(3.4, len / 12)),
+      draw(ctx, amount) {
+        if (amount <= 0) return;
+        if (amount >= 1) {
+          drawThread(ctx, piece.x1, piece.y1, piece.x2, piece.y2, color, width, clothDark);
+          return;
+        }
+        const phase = stabPhase(amount, lead, tail);
+        if (phase.t <= 0) return;
+        const eye = needleLen * 0.58;
+        const tip = len * phase.t;
+        const end =
+          phase.sink > 0.22 && phase.t >= 1 ? len : Math.max(Math.min(2.4, tip), tip - eye);
+        if (end <= 0.4) return;
+        const t = Math.min(1, end / len);
+        drawThread(
+          ctx,
+          piece.x1,
+          piece.y1,
+          piece.x1 + dx * t,
+          piece.y1 + dy * t,
+          color,
+          width,
+          clothDark,
+        );
+      },
+      needle(amount) {
+        const phase = stabPhase(amount, lead, tail);
+        return {
+          x: piece.x1 + dx * phase.t,
+          y: piece.y1 + dy * phase.t,
+          angle: Math.atan2(dy, dx),
+          sink: phase.sink,
+          length: needleLen,
+          entry: lead ? { x: piece.x1, y: piece.y1 } : undefined,
+          exit: tail && phase.t > 0.78 ? { x: piece.x2, y: piece.y2 } : undefined,
+        };
+      },
+    });
+  });
+}
+
+function pushUnder(
+  marks: SewMark[],
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  charIndex: number,
+  clothDark: boolean,
+) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const len = Math.hypot(dx, dy);
+  if (len < 0.8) return;
+  marks.push({
+    charIndex,
+    weight: Math.max(0.85, Math.min(1.6, len / 16)),
+    draw(ctx, amount) {
+      if (amount <= 0.01 || amount >= 1) return;
+      drawBuriedThread(ctx, x1, y1, x1 + dx * amount, y1 + dy * amount, clothDark);
+    },
+    needle(amount) {
+      return {
+        x: x1 + dx * amount,
+        y: y1 + dy * amount,
+        angle: Math.atan2(dy, dx),
+        sink: 1,
+        length: Math.min(12, Math.max(7, len * 0.35)),
+        entry: { x: x1, y: y1 },
+      };
+    },
+  });
+}
+
+function stabPhase(amount: number, lead: boolean, tail: boolean) {
+  const up = lead ? 0.18 : 0;
+  const down = tail ? 0.16 : 0;
+  const span = Math.max(0.05, 1 - up - down);
+  if (amount <= up) {
+    return { t: 0, sink: up === 0 ? 0 : 1 - amount / up };
+  }
+  if (amount >= 1 - down) {
+    return { t: 1, sink: down === 0 ? 0 : (amount - (1 - down)) / down };
+  }
+  return { t: (amount - up) / span, sink: 0 };
+}
+
+function bezierPoint(p0: Point, p1: Point, p2: Point, p3: Point, t: number): Point {
+  const u = 1 - t;
+  return {
+    x: u * u * u * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * p3.x,
+    y: u * u * u * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * p3.y,
+  };
+}
+
+function strokeThread(
+  ctx: CanvasRenderingContext2D,
+  points: Point[],
+  color: string,
+  width: number,
+  clothDark: boolean,
+) {
+  if (points.length < 2) return;
+  const trace = () => {
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+  };
+  const alpha = ctx.globalAlpha;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  trace();
+  ctx.strokeStyle = clothDark ? "rgba(0,0,0,0.45)" : "rgba(72, 42, 28, 0.24)";
+  ctx.lineWidth = width + 0.9;
+  ctx.stroke();
+  trace();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.stroke();
+  trace();
+  ctx.strokeStyle = lighten(color, clothDark ? 0.5 : 0.34);
+  ctx.globalAlpha = alpha * (clothDark ? 0.72 : 0.48);
+  ctx.lineWidth = Math.max(0.5, width * 0.28);
+  ctx.stroke();
+  ctx.globalAlpha = alpha;
+}
+
+function drawCoil(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  radius: number,
+  turns: number,
+  color: string,
+  rot: number,
+  clothDark: boolean,
+) {
+  if (turns <= 0.02 || radius <= 0.4) return;
+  const steps = Math.max(6, Math.ceil(turns * 20));
+  const points: Point[] = [];
+  for (let i = 0; i <= steps; i++) {
+    const a = rot + (i / steps) * turns * Math.PI * 2;
+    const r = radius * (1 - 0.12 * (i / steps));
+    points.push({ x: x + Math.cos(a) * r, y: y + Math.sin(a) * r });
+  }
+  strokeThread(ctx, points, color, Math.max(1.15, radius * 0.34), clothDark);
+}
+
+function drawBuriedThread(
+  ctx: CanvasRenderingContext2D,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  clothDark: boolean,
+) {
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.strokeStyle = clothDark ? "rgba(255,255,255,0.13)" : "rgba(62, 38, 22, 0.16)";
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.stroke();
+  ctx.strokeStyle = clothDark ? "rgba(0,0,0,0.2)" : "rgba(255, 248, 236, 0.42)";
+  ctx.lineWidth = 1.4;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawNeedle(ctx: CanvasRenderingContext2D, pose: NeedlePose, clothDark: boolean) {
+  const sink = Math.max(0, Math.min(1, pose.sink));
+  if (pose.entry && sink < 0.98) drawHole(ctx, pose.entry.x, pose.entry.y, clothDark);
+  if (pose.exit && sink > 0.12) drawHole(ctx, pose.exit.x, pose.exit.y, clothDark);
+  if (sink > 0.4) drawDimple(ctx, pose, clothDark);
+  if (pose.upright) {
+    drawUprightNeedle(ctx, pose, sink, clothDark);
+    return;
+  }
+  if (sink > 0.8) return;
+
+  const visible = 1 - sink;
+  const length = pose.length * (0.4 + 0.6 * visible);
+  ctx.save();
+  ctx.translate(pose.x, pose.y);
+  ctx.rotate(pose.angle);
+  ctx.fillStyle = clothDark ? "rgba(0,0,0,0.4)" : "rgba(48, 28, 16, 0.22)";
+  ctx.beginPath();
+  ctx.moveTo(1.5, 1.1);
+  ctx.lineTo(-length, 0.2);
+  ctx.lineTo(-length, 2.2);
+  ctx.closePath();
+  ctx.fill();
+
+  const metal = ctx.createLinearGradient(-length, -1.2, 2, 1.2);
+  metal.addColorStop(0, "#8e98a3");
+  metal.addColorStop(0.42, "#f5f8fb");
+  metal.addColorStop(1, "#c5ced6");
+  ctx.fillStyle = metal;
+  ctx.beginPath();
+  ctx.moveTo(2.5, 0);
+  ctx.lineTo(-length + 2.4, -1.15);
+  ctx.lineTo(-length, -0.85);
+  ctx.lineTo(-length, 0.85);
+  ctx.lineTo(-length + 2.4, 1.15);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = clothDark ? "#140e0a" : "#24180f";
+  ctx.beginPath();
+  ctx.ellipse(-length + 2.15, 0, 0.55, 0.95, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawUprightNeedle(
+  ctx: CanvasRenderingContext2D,
+  pose: NeedlePose,
+  sink: number,
+  clothDark: boolean,
+) {
+  if (sink > 0.84) return;
+  const length = 13 * (1 - sink);
+  ctx.save();
+  ctx.translate(pose.x, pose.y);
+  ctx.fillStyle = clothDark ? "rgba(0,0,0,0.4)" : "rgba(48, 28, 16, 0.22)";
+  ctx.beginPath();
+  ctx.ellipse(1.1, 1, 2.1, 1.25, 0, 0, Math.PI * 2);
+  ctx.fill();
+  const metal = ctx.createLinearGradient(0, 0, -1.5, -length);
+  metal.addColorStop(0, "#b7c1cb");
+  metal.addColorStop(1, "#f7f9fb");
+  ctx.fillStyle = metal;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(-2.5, -length);
+  ctx.lineTo(1.35, -length + 0.5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = clothDark ? "#0e0a08" : "#24180f";
+  ctx.lineWidth = 0.7;
+  ctx.beginPath();
+  ctx.ellipse(-0.55, -length + 2.3, 0.55, 0.85, -0.4, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawHole(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  clothDark: boolean,
+) {
+  ctx.beginPath();
+  ctx.fillStyle = clothDark ? "rgba(0,0,0,0.78)" : "rgba(32, 16, 8, 0.72)";
+  ctx.arc(x, y, 2.05, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.fillStyle = clothDark ? "rgba(255,255,255,0.28)" : "rgba(255,248,236,0.85)";
+  ctx.arc(x - 0.45, y - 0.5, 0.62, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawDimple(ctx: CanvasRenderingContext2D, pose: NeedlePose, clothDark: boolean) {
+  ctx.save();
+  ctx.translate(pose.x, pose.y);
+  ctx.rotate(pose.angle);
+  ctx.fillStyle = clothDark ? "rgba(0,0,0,0.34)" : "rgba(48, 28, 16, 0.28)";
+  ctx.beginPath();
+  ctx.ellipse(1.6, 1.3, 9.5, 4.6, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = clothDark ? "rgba(255,255,255,0.14)" : "rgba(255,250,242,0.72)";
+  ctx.beginPath();
+  ctx.ellipse(-0.8, -0.7, 6.2, 2.8, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = clothDark ? "rgba(0,0,0,0.22)" : "rgba(90, 58, 36, 0.18)";
+  ctx.beginPath();
+  ctx.ellipse(0.2, 0.15, 7.2, 1.35, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function cutSegment(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  ranges: Array<[number, number]>,
+) {
+  if (ranges.length === 0) {
+    return [{ x1, y1, x2, y2, charIndex: 0 }];
+  }
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const ts = [0, 1];
+  if (Math.abs(dx) > 0.01) {
+    for (let i = 0; i < ranges.length - 1; i++) {
+      const t = (ranges[i][1] - x1) / dx;
+      if (t > 0.02 && t < 0.98) ts.push(t);
+    }
+  }
+  ts.sort((a, b) => a - b);
+  const pieces: Array<{ x1: number; y1: number; x2: number; y2: number; charIndex: number }> = [];
+  for (let i = 0; i < ts.length - 1; i++) {
+    if (ts[i + 1] - ts[i] < 0.02) continue;
+    const t0 = ts[i];
+    const t1 = ts[i + 1];
+    const ax = x1 + dx * t0;
+    const ay = y1 + dy * t0;
+    const bx = x1 + dx * t1;
+    const by = y1 + dy * t1;
+    pieces.push({
+      x1: ax,
+      y1: ay,
+      x2: bx,
+      y2: by,
+      charIndex: charIndexAt((ax + bx) / 2, ranges),
+    });
+  }
+  if (pieces.length === 0) {
+    return [{ x1, y1, x2, y2, charIndex: charIndexAt((x1 + x2) / 2, ranges) }];
+  }
+  return pieces;
 }
 
 function drawThread(
@@ -960,6 +1738,7 @@ function forEachDash(
   dash: number,
   gap: number,
   fn: (a: Point, b: Point, index: number) => void,
+  onGap?: (a: Point, b: Point) => void,
 ) {
   if (pts.length < 2) return;
   const loop = [...pts, pts[0]];
@@ -991,7 +1770,10 @@ function forEachDash(
     const nx = pos.x + ((segEnd.x - pos.x) / segLeft) * step;
     const ny = pos.y + ((segEnd.y - pos.y) / segLeft) * step;
     const next = { x: nx, y: ny };
-    if (drawing && step > 0.2) fn(pos, next, index);
+    if (step > 0.2) {
+      if (drawing) fn(pos, next, index);
+      else onGap?.(pos, next);
+    }
     pos = next;
     segLeft -= step;
     remain -= step;

@@ -5,10 +5,14 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 const useIsoLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 import {
   STITCHES,
+  buildEmbroideryScene,
+  drawEmbroideryScene,
   measureTextWidth,
   measureWord,
-  paintEmbroidery,
+  sceneSewWeight,
+  sewDurationFor,
   visibleTextWidth,
+  type EmbroideryScene,
   type StitchId,
 } from "@/lib/embroidery";
 
@@ -66,13 +70,47 @@ export function Studio() {
     return () => observer.disconnect();
   }, []);
 
+  const sewRef = useRef({
+    text: "",
+    stitch: DEFAULTS.stitch,
+    from: 0,
+    started: 0,
+    duration: 0,
+  });
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !fontReady) return;
     const parent = canvas.parentElement;
     if (!parent) return;
 
-    const paint = () => {
+    const next = text.trim();
+    const prev = sewRef.current;
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduced || !next) {
+      sewRef.current = { text: next, stitch, from: next.length, started: 0, duration: 0 };
+    } else if (stitch !== prev.stitch) {
+      sewRef.current = { text: next, stitch, from: 0, started: 0, duration: -1 };
+    } else if (next.startsWith(prev.text) && next.length > prev.text.length) {
+      const added = next.slice(prev.text.length);
+      sewRef.current = added.trim()
+        ? { text: next, stitch, from: prev.text.length, started: 0, duration: -1 }
+        : { text: next, stitch, from: next.length, started: 0, duration: 0 };
+    } else if (next.length < prev.text.length && prev.text.startsWith(next)) {
+      sewRef.current = { text: next, stitch, from: next.length, started: 0, duration: 0 };
+    } else if (next !== prev.text) {
+      let from = 0;
+      const limit = Math.min(next.length, prev.text.length);
+      while (from < limit && next[from] === prev.text[from]) from++;
+      sewRef.current = { text: next, stitch, from, started: 0, duration: -1 };
+    }
+
+    let scene: EmbroideryScene | null = null;
+    let sceneKey = "";
+    let frame = 0;
+    let backup = 0;
+
+    const paint = (now: number) => {
       const rect = parent.getBoundingClientRect();
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const width = Math.max(1, rect.width);
@@ -84,22 +122,65 @@ export function Studio() {
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      paintEmbroidery(ctx, width, height, {
-        text,
-        stitch,
-        thread,
-        accent,
-        fabric,
-        scale: measureWord(text, fontFamily(), width, height, insetBottom).stitchScale,
-        fontFamily: fontFamily(),
-        insetBottom,
-      });
+      const key = `${text}|${stitch}|${thread}|${accent}|${fabric}|${width}|${height}|${insetBottom}`;
+      if (!scene || sceneKey !== key) {
+        scene = buildEmbroideryScene(width, height, {
+          text,
+          stitch,
+          thread,
+          accent,
+          fabric,
+          scale: measureWord(text, fontFamily(), width, height, insetBottom).stitchScale,
+          fontFamily: fontFamily(),
+          insetBottom,
+        });
+        sceneKey = key;
+      }
+      const sew = sewRef.current;
+      if (sew.duration < 0) {
+        sew.duration = sewDurationFor(sceneSewWeight(scene, sew.from));
+      }
+      const progress =
+        sew.duration === 0
+          ? 1
+          : sew.started === 0
+            ? 0
+            : Math.max(0, Math.min(1, (now - sew.started) / sew.duration));
+      drawEmbroideryScene(ctx, width, height, scene, sew.from, progress);
     };
 
-    paint();
-    const observer = new ResizeObserver(paint);
+    const tick = (now: number) => {
+      const sew = sewRef.current;
+      if (sew.duration > 0 && sew.started === 0) sew.started = now;
+      paint(now);
+      if (sew.duration > 0 && now - sew.started < sew.duration) schedule();
+    };
+
+    const schedule = () => {
+      let settled = false;
+      frame = requestAnimationFrame((now) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(backup);
+        tick(now);
+      });
+      backup = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cancelAnimationFrame(frame);
+        tick(performance.now());
+      }, 40);
+    };
+
+    paint(performance.now());
+    schedule();
+    const observer = new ResizeObserver(() => paint(performance.now()));
     observer.observe(parent);
-    return () => observer.disconnect();
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(backup);
+      observer.disconnect();
+    };
   }, [text, stitch, thread, accent, fabric, insetBottom, fontReady]);
 
   const layout =

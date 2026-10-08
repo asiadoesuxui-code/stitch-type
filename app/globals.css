@@ -23,6 +23,33 @@ body {
   border: 0;
 }
 
+.word-field::selection {
+  background: rgba(156, 48, 72, 0.28);
+  color: transparent;
+}
+
+.stitch-caret {
+  border-radius: 1px;
+  animation: stitch-blink 1.05s steps(1, end) infinite;
+}
+
+@keyframes stitch-blink {
+  0%,
+  45% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stitch-caret {
+    animation: none;
+  }
+}
+
 .stitch-range {
   appearance: none;
   width: 100%;

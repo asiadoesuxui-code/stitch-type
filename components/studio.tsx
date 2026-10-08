@@ -1,14 +1,19 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+
+const useIsoLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 import {
   STITCHES,
+  measureTextWidth,
+  measureWord,
   paintEmbroidery,
+  visibleTextWidth,
   type StitchId,
 } from "@/lib/embroidery";
 
 const DEFAULTS = {
-  text: "Floss",
+  text: "",
   stitch: "satin" as StitchId,
   thread: "#9c3048",
   accent: "#1f6b45",
@@ -19,6 +24,8 @@ const DEFAULTS = {
 export function Studio() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const controlsRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const wordRef = useRef<HTMLInputElement>(null);
   const [text, setText] = useState(DEFAULTS.text);
   const [stitch, setStitch] = useState<StitchId>(DEFAULTS.stitch);
   const [thread, setThread] = useState(DEFAULTS.thread);
@@ -26,7 +33,10 @@ export function Studio() {
   const [fabric, setFabric] = useState(DEFAULTS.fabric);
   const [scale, setScale] = useState(DEFAULTS.scale);
   const [insetBottom, setInsetBottom] = useState(180);
+  const [stage, setStage] = useState({ width: 0, height: 0 });
   const [fontReady, setFontReady] = useState(false);
+  const [focused, setFocused] = useState(true);
+  const [caret, setCaret] = useState(0);
 
   const active = STITCHES.find((item) => item.id === stitch) ?? STITCHES[0];
   const darkCloth = relativeLuminance(fabric) < 0.42;
@@ -37,18 +47,25 @@ export function Studio() {
     document.fonts.load(`600 120px ${family}`).then(() => {
       if (!cancel) setFontReady(true);
     });
+    wordRef.current?.focus();
     return () => {
       cancel = true;
     };
   }, []);
 
-  useEffect(() => {
+  useIsoLayoutEffect(() => {
     const controls = controlsRef.current;
-    if (!controls) return;
-    const measure = () => setInsetBottom(controls.offsetHeight + 28);
+    const stageEl = stageRef.current;
+    if (!controls || !stageEl) return;
+    const measure = () => {
+      setInsetBottom(controls.offsetHeight + 28);
+      const rect = stageEl.getBoundingClientRect();
+      setStage({ width: rect.width, height: rect.height });
+    };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(controls);
+    observer.observe(stageEl);
     return () => observer.disconnect();
   }, []);
 
@@ -88,14 +105,97 @@ export function Studio() {
     return () => observer.disconnect();
   }, [text, stitch, thread, accent, fabric, scale, insetBottom, fontReady]);
 
+  const layout =
+    stage.width > 0
+      ? measureWord(text, fontFamily(), stage.width, stage.height, insetBottom)
+      : null;
+
+  const caretLeft = (word: NonNullable<typeof layout>) => {
+    const family = fontFamily();
+    const bar = Math.max(3, word.fontSize * 0.04);
+    const visual = visibleTextWidth(
+      text,
+      stitch,
+      family,
+      stage.width,
+      stage.height,
+      insetBottom,
+      scale,
+    );
+    const prefix = measureTextWidth(
+      text.slice(0, caret),
+      family,
+      word.fontSize,
+      word.letterSpacing,
+    );
+    const ratio = word.textWidth > 0 ? Math.min(1, prefix / word.textWidth) : 0;
+    return stage.width / 2 - visual / 2 + ratio * visual - bar / 2;
+  };
+
   return (
-    <div className="relative h-dvh overflow-hidden" style={{ background: fabric }}>
+    <div
+      ref={stageRef}
+      className="relative h-dvh overflow-hidden"
+      style={{ background: fabric }}
+    >
       <h1 className="sr-only">Stitch</h1>
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" aria-hidden />
 
       <div
+        className="absolute inset-x-0 top-0 z-10 flex items-center"
+        style={{ bottom: insetBottom }}
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget) {
+            event.preventDefault();
+            wordRef.current?.focus();
+          }
+        }}
+      >
+        <input
+          ref={wordRef}
+          value={text}
+          aria-label="Type a word"
+          onChange={(event) => {
+            const next = event.target.value.slice(0, 18);
+            setText(next);
+            setCaret(Math.min(event.target.selectionStart ?? next.length, next.length));
+          }}
+          onSelect={(event) => setCaret(event.currentTarget.selectionStart ?? 0)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          className="word-field w-full bg-transparent text-center outline-none"
+          style={{
+            fontFamily: "var(--font-display), Georgia, serif",
+            fontWeight: 600,
+            fontSize: layout?.fontSize ?? 160,
+            letterSpacing: layout ? `${layout.letterSpacing}px` : "0.035em",
+            lineHeight: 1,
+            color: "transparent",
+            caretColor: "transparent",
+          }}
+        />
+        {layout && (focused || text.length === 0) && (
+          <span
+            aria-hidden
+            className="stitch-caret pointer-events-none absolute"
+            style={{
+              left: caretLeft(layout),
+              top: layout.centerY - (layout.fontSize * 0.9) / 2,
+              height: layout.fontSize * 0.9,
+              width: Math.max(3, layout.fontSize * 0.04),
+              transform: "none",
+              background: thread,
+            }}
+          />
+        )}
+      </div>
+
+      <div
         ref={controlsRef}
-        className="absolute inset-x-0 bottom-0 z-10 px-3 pb-3 sm:px-5 sm:pb-5"
+        className="absolute inset-x-0 bottom-0 z-20 px-3 pb-3 sm:px-5 sm:pb-5"
       >
         <div
           className={`mx-auto w-full max-w-3xl rounded-3xl border p-3 shadow-[0_20px_50px_rgba(40,24,12,0.14)] backdrop-blur-md sm:p-4 ${
@@ -104,31 +204,12 @@ export function Studio() {
               : "border-[#3a2a1c]/10 bg-[#fffaf3]/82 text-[#2a2118]"
           }`}
         >
-          <div className="flex items-end justify-between gap-4 px-1">
-            <label className="block min-w-0 flex-1">
-              <span className="text-[11px] font-medium tracking-[0.18em] uppercase opacity-60">
-                Word
-              </span>
-              <input
-                value={text}
-                onChange={(event) => setText(event.target.value.slice(0, 18))}
-                placeholder="Type a word"
-                spellCheck={false}
-                autoCapitalize="off"
-                autoCorrect="off"
-                className="mt-1 w-full bg-transparent text-3xl leading-none outline-none placeholder:opacity-30 sm:text-4xl"
-                style={{ fontFamily: "var(--font-display), Georgia, serif" }}
-              />
-            </label>
-            <p className="hidden max-w-56 pb-1 text-right text-xs leading-5 opacity-70 sm:block">
-              {active.blurb}
-            </p>
-          </div>
+          <p className="px-1 text-xs leading-5 opacity-70">{active.blurb}</p>
 
           <div
             role="radiogroup"
             aria-label="Stitch type"
-            className="mt-3 flex gap-1.5 overflow-x-auto pb-1"
+            className="mt-2 flex gap-1.5 overflow-x-auto pb-1"
           >
             {STITCHES.map((item) => {
               const selected = item.id === stitch;
@@ -138,7 +219,11 @@ export function Studio() {
                   type="button"
                   role="radio"
                   aria-checked={selected}
-                  onClick={() => setStitch(item.id)}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    setStitch(item.id);
+                    wordRef.current?.focus();
+                  }}
                   className={`flex min-w-[4.6rem] flex-1 flex-col items-center gap-1 rounded-2xl px-2 py-2 text-[11px] tracking-wide transition ${
                     selected
                       ? darkCloth
@@ -158,10 +243,6 @@ export function Studio() {
               );
             })}
           </div>
-
-          <p className="px-1 pt-2 text-xs leading-5 opacity-70 sm:hidden">
-            {active.blurb}
-          </p>
 
           <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-3 px-1">
             <Swatch label="Thread" value={thread} onChange={setThread} />

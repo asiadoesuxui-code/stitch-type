@@ -73,6 +73,70 @@ const CASES: Array<Array<[number, number]>> = [
   [],
 ];
 
+export type WordLayout = {
+  fontSize: number;
+  letterSpacing: number;
+  centerY: number;
+  textWidth: number;
+};
+
+export function measureWord(
+  text: string,
+  fontFamily: string,
+  width: number,
+  height: number,
+  insetBottom: number,
+): WordLayout {
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  const maxW = width * 0.88;
+  const maxH = Math.max(40, (height - insetBottom) * 0.78);
+  const centerY = (height - insetBottom) / 2;
+  let size = Math.min(maxH * 0.92, width * 0.42);
+  const sample = text.trim();
+
+  if (ctx && sample) {
+    while (size > 28) {
+      ctx.font = `600 ${size}px ${fontFamily}`;
+      ctx.letterSpacing = `${size * 0.035}px`;
+      const metrics = ctx.measureText(sample);
+      const textH =
+        (metrics.actualBoundingBoxAscent || size * 0.72) +
+        (metrics.actualBoundingBoxDescent || size * 0.18);
+      if (metrics.width <= maxW && textH <= maxH) break;
+      size *= 0.94;
+    }
+  }
+
+  let textWidth = 0;
+  if (ctx && sample) {
+    ctx.font = `600 ${size}px ${fontFamily}`;
+    ctx.letterSpacing = `${size * 0.035}px`;
+    textWidth = ctx.measureText(sample).width;
+  }
+
+  return {
+    fontSize: size,
+    letterSpacing: size * 0.035,
+    centerY,
+    textWidth,
+  };
+}
+
+export function measureTextWidth(
+  text: string,
+  fontFamily: string,
+  fontSize: number,
+  letterSpacing: number,
+) {
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  if (!ctx || !text) return 0;
+  ctx.font = `600 ${fontSize}px ${fontFamily}`;
+  ctx.letterSpacing = `${letterSpacing}px`;
+  return ctx.measureText(text).width;
+}
+
 export function paintEmbroidery(
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -201,34 +265,27 @@ function rasterizeText(
   height: number,
 ): Mask | null {
   const scale = 2;
+  const layout = measureWord(
+    text,
+    options.fontFamily,
+    width,
+    height,
+    options.insetBottom,
+  );
   const canvas = document.createElement("canvas");
   canvas.width = Math.round(width * scale);
   canvas.height = Math.round(height * scale);
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) return null;
 
-  const maxW = canvas.width * 0.88;
-  const maxH = Math.max(80, (canvas.height - options.insetBottom * scale) * 0.78);
-  const centerY = (canvas.height - options.insetBottom * scale) / 2;
-  let size = Math.min(maxH * 0.92, canvas.width * 0.42);
+  const size = layout.fontSize * scale;
+  const centerY = layout.centerY * scale;
 
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillStyle = "#fff";
-
-  while (size > 28) {
-    ctx.font = `600 ${size}px ${options.fontFamily}`;
-    ctx.letterSpacing = `${size * 0.035}px`;
-    const metrics = ctx.measureText(text);
-    const textH =
-      (metrics.actualBoundingBoxAscent || size * 0.72) +
-      (metrics.actualBoundingBoxDescent || size * 0.18);
-    if (metrics.width <= maxW && textH <= maxH) break;
-    size *= 0.94;
-  }
-
   ctx.font = `600 ${size}px ${options.fontFamily}`;
-  ctx.letterSpacing = `${size * 0.035}px`;
+  ctx.letterSpacing = `${layout.letterSpacing * scale}px`;
   ctx.fillText(text, canvas.width / 2, centerY);
 
   const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -239,6 +296,84 @@ function rasterizeText(
   return { mask, w: canvas.width, h: canvas.height, scale };
 }
 
+function crossChart(
+  text: string,
+  fontFamily: string,
+  width: number,
+  height: number,
+  insetBottom: number,
+  stitchScale: number,
+) {
+  const cell = clampNum(16, 34, 22 * stitchScale);
+  const maxW = width * 0.9;
+  const maxH = Math.max(48, (height - insetBottom) * 0.8);
+  const cols = Math.max(6, Math.round(maxW / cell));
+  const rows = Math.max(6, Math.round(maxH / cell));
+  const sample = text.trim();
+  const mini = document.createElement("canvas");
+  mini.width = cols;
+  mini.height = rows;
+  const m = mini.getContext("2d", { willReadFrequently: true });
+  if (!m || !sample) return null;
+
+  m.textAlign = "center";
+  m.textBaseline = "middle";
+  m.fillStyle = "#fff";
+  let size = rows * 0.9;
+  while (size > 4) {
+    m.font = `650 ${size}px ${fontFamily}`;
+    m.letterSpacing = `${Math.max(0, size * 0.02)}px`;
+    if (m.measureText(sample).width <= cols * 0.94) break;
+    size *= 0.92;
+  }
+  m.font = `650 ${size}px ${fontFamily}`;
+  m.letterSpacing = `${Math.max(0, size * 0.02)}px`;
+  m.fillText(sample, cols / 2, rows / 2 + rows * 0.02);
+
+  const pixels = m.getImageData(0, 0, cols, rows).data;
+  let minCol = cols;
+  let maxCol = -1;
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      if (pixels[(y * cols + x) * 4 + 3] < 90) continue;
+      if (x < minCol) minCol = x;
+      if (x > maxCol) maxCol = x;
+    }
+  }
+
+  const gridW = cols * cell;
+  const gridH = rows * cell;
+  return {
+    cell,
+    cols,
+    rows,
+    pixels,
+    ox: (width - gridW) / 2,
+    oy: (height - insetBottom - gridH) / 2,
+    textWidth: maxCol >= minCol ? (maxCol - minCol + 1) * cell : 0,
+  };
+}
+
+export function visibleTextWidth(
+  text: string,
+  stitch: StitchId,
+  fontFamily: string,
+  width: number,
+  height: number,
+  insetBottom: number,
+  stitchScale: number,
+) {
+  const sample = text.trim();
+  if (!sample) return 0;
+  if (stitch === "cross") {
+    return (
+      crossChart(sample, fontFamily, width, height, insetBottom, stitchScale)
+        ?.textWidth ?? 0
+    );
+  }
+  return measureWord(sample, fontFamily, width, height, insetBottom).textWidth;
+}
+
 function drawCrossStitch(
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -247,37 +382,17 @@ function drawCrossStitch(
   clothDark: boolean,
   rng: () => number,
 ) {
-  const cell = clampNum(16, 34, 22 * options.scale);
-  const maxW = width * 0.9;
-  const maxH = Math.max(48, (height - options.insetBottom) * 0.8);
-  const cols = Math.max(6, Math.round(maxW / cell));
-  const rows = Math.max(6, Math.round(maxH / cell));
+  const chart = crossChart(
+    options.text,
+    options.fontFamily,
+    width,
+    height,
+    options.insetBottom,
+    options.scale,
+  );
+  if (!chart) return;
 
-  const mini = document.createElement("canvas");
-  mini.width = cols;
-  mini.height = rows;
-  const m = mini.getContext("2d", { willReadFrequently: true });
-  if (!m) return;
-
-  m.textAlign = "center";
-  m.textBaseline = "middle";
-  m.fillStyle = "#fff";
-  let size = rows * 0.9;
-  while (size > 4) {
-    m.font = `650 ${size}px ${options.fontFamily}`;
-    m.letterSpacing = `${Math.max(0, size * 0.02)}px`;
-    if (m.measureText(options.text.trim()).width <= cols * 0.94) break;
-    size *= 0.92;
-  }
-  m.font = `650 ${size}px ${options.fontFamily}`;
-  m.letterSpacing = `${Math.max(0, size * 0.02)}px`;
-  m.fillText(options.text.trim(), cols / 2, rows / 2 + rows * 0.02);
-
-  const pixels = m.getImageData(0, 0, cols, rows).data;
-  const gridW = cols * cell;
-  const gridH = rows * cell;
-  const ox = (width - gridW) / 2;
-  const oy = (height - options.insetBottom - gridH) / 2;
+  const { cell, cols, rows, pixels, ox, oy } = chart;
   const threadW = Math.max(1.1, cell * 0.16);
 
   for (let y = 0; y < rows; y++) {

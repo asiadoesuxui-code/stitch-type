@@ -115,10 +115,16 @@ export function Studio() {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const width = Math.max(1, rect.width);
       const height = Math.max(1, rect.height);
-      canvas.width = Math.round(width * dpr);
-      canvas.height = Math.round(height * dpr);
-      canvas.style.width = `${width}px`;
-      canvas.style.height = `${height}px`;
+      const nextW = Math.round(width * dpr);
+      const nextH = Math.round(height * dpr);
+      if (canvas.width !== nextW || canvas.height !== nextH) {
+        canvas.width = nextW;
+        canvas.height = nextH;
+      }
+      const cssW = `${width}px`;
+      const cssH = `${height}px`;
+      if (canvas.style.width !== cssW) canvas.style.width = cssW;
+      if (canvas.style.height !== cssH) canvas.style.height = cssH;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);

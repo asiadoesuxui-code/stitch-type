@@ -775,14 +775,121 @@ function satinStrokes(mask: Mask, spacingScreen: number) {
     if (row.length) strokes.push(row);
   }
 
-  strokes.sort((a, b) => {
+  const kept = dropCoveredSpurs(strokes, spacingScreen);
+  const all = kept.concat(satinDots(mask, kept, spacing));
+  all.sort((a, b) => {
     const ax = Math.min(...a.map((stitch) => Math.min(stitch.ax, stitch.bx)));
     const bx = Math.min(...b.map((stitch) => Math.min(stitch.ax, stitch.bx)));
     const ay = Math.min(...a.map((stitch) => Math.min(stitch.ay, stitch.by)));
     const by = Math.min(...b.map((stitch) => Math.min(stitch.ay, stitch.by)));
     return ax - bx || ay - by;
   });
-  return dropCoveredSpurs(strokes, spacingScreen);
+  return all;
+}
+
+function satinDots(mask: Mask, strokes: SatinStitch[][], spacing: number) {
+  const count = mask.w * mask.h;
+  if (!count) return [] as SatinStitch[][];
+  const seen = new Uint8Array(count);
+  const hit = new Uint8Array(count);
+  for (const stroke of strokes) {
+    for (const stitch of stroke) {
+      const ix = Math.round(((stitch.ax + stitch.bx) / 2) * mask.scale);
+      const iy = Math.round(((stitch.ay + stitch.by) / 2) * mask.scale);
+      if (ix < 0 || iy < 0 || ix >= mask.w || iy >= mask.h) continue;
+      hit[iy * mask.w + ix] = 1;
+    }
+  }
+
+  const box = bounds(mask.mask, mask.w, mask.h);
+  const extra: SatinStitch[][] = [];
+  if (!box) return extra;
+  const stack: number[] = [];
+  for (let y0 = box.minY; y0 <= box.maxY; y0++) {
+    for (let x0 = box.minX; x0 <= box.maxX; x0++) {
+      const start = y0 * mask.w + x0;
+      if (!mask.mask[start] || seen[start]) continue;
+      stack.push(start);
+      seen[start] = 1;
+      let covered = hit[start] === 1;
+      const pixels: Point[] = [];
+      if (!covered) pixels.push({ x: start % mask.w, y: (start / mask.w) | 0 });
+      while (stack.length) {
+        const cur = stack.pop() as number;
+        const x = cur % mask.w;
+        const y = (cur / mask.w) | 0;
+        for (let k = 0; k < SATIN_N8.length; k++) {
+          const nx = x + SATIN_N8[k][0];
+          const ny = y + SATIN_N8[k][1];
+          if (nx < 0 || ny < 0 || nx >= mask.w || ny >= mask.h) continue;
+          const ni = ny * mask.w + nx;
+          if (seen[ni] || !mask.mask[ni]) continue;
+          seen[ni] = 1;
+          stack.push(ni);
+          if (hit[ni]) {
+            covered = true;
+            pixels.length = 0;
+          } else if (!covered) pixels.push({ x: nx, y: ny });
+        }
+      }
+      if (covered) continue;
+      const row = blobSatin(pixels, mask, spacing);
+      if (row.length) extra.push(row);
+    }
+  }
+  return extra;
+}
+
+function blobSatin(pixels: Point[], mask: Mask, spacing: number) {
+  if (pixels.length < 6) return [] as SatinStitch[];
+  const slant = (-22 * Math.PI) / 180;
+  const dx = Math.cos(slant);
+  const dy = Math.sin(slant);
+  const nx = -dy;
+  const ny = dx;
+  let minN = Infinity;
+  let maxN = -Infinity;
+  let cx = 0;
+  let cy = 0;
+  const ink = new Set<number>();
+  for (const p of pixels) {
+    cx += p.x;
+    cy += p.y;
+    ink.add(p.y * mask.w + p.x);
+    const n = p.x * nx + p.y * ny;
+    if (n < minN) minN = n;
+    if (n > maxN) maxN = n;
+  }
+  cx /= pixels.length;
+  cy /= pixels.length;
+  const span = maxN - minN;
+  const lines = span < spacing * 1.15 ? 1 : Math.max(1, Math.round(span / spacing));
+  const step = lines === 1 ? 0 : span / lines;
+  const start = lines === 1 ? (minN + maxN) / 2 : minN + step / 2;
+  const row: SatinStitch[] = [];
+  for (let i = 0; i < lines; i++) {
+    const n = start + step * i;
+    const cn = cx * nx + cy * ny;
+    const origin = nearestInk(pixels, ink, mask.w, cx + nx * (n - cn), cy + ny * (n - cn));
+    const hit = castSatin(mask, origin.x, origin.y, dx, dy, localSatinWidth(mask, origin.x, origin.y));
+    if (hit) row.push(hit);
+  }
+  return row;
+}
+
+function nearestInk(pixels: Point[], ink: Set<number>, w: number, x: number, y: number) {
+  const ix = Math.round(x);
+  const iy = Math.round(y);
+  if (ink.has(iy * w + ix)) return { x: ix, y: iy };
+  let best = pixels[0];
+  let bestD = Infinity;
+  for (const p of pixels) {
+    const d = (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y);
+    if (d >= bestD) continue;
+    bestD = d;
+    best = p;
+  }
+  return { x: best.x, y: best.y };
 }
 
 function dropCoveredSpurs(strokes: SatinStitch[][], spacing: number) {
@@ -2081,27 +2188,40 @@ function paintSatinStrand(
   ctx.restore();
 }
 
-const satinScratch: { color: HTMLCanvasElement | null; mask: HTMLCanvasElement | null } = {
+type SatinScratch = { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D };
+
+const satinScratch: { color: SatinScratch | null; mask: SatinScratch | null } = {
   color: null,
   mask: null,
 };
 
+function scratchSize(pixels: number) {
+  let size = 64;
+  while (size < pixels) size *= 2;
+  return size;
+}
+
 function scratchCanvas(slot: "color" | "mask", width: number, height: number) {
-  let canvas = satinScratch[slot];
-  if (!canvas) {
-    canvas = document.createElement("canvas");
-    satinScratch[slot] = canvas;
+  let scratch = satinScratch[slot];
+  if (!scratch) {
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    scratch = { canvas, ctx };
+    satinScratch[slot] = scratch;
   }
-  const g = canvas.getContext("2d");
-  if (canvas.width !== width || canvas.height !== height) {
-    canvas.width = width;
-    canvas.height = height;
-  } else if (g) {
-    g.setTransform(1, 0, 0, 1, 0, 0);
-    g.globalCompositeOperation = "source-over";
-    g.clearRect(0, 0, width, height);
+  const { canvas, ctx } = scratch;
+  const nextW = Math.max(canvas.width, scratchSize(width));
+  const nextH = Math.max(canvas.height, scratchSize(height));
+  if (canvas.width !== nextW || canvas.height !== nextH) {
+    canvas.width = nextW;
+    canvas.height = nextH;
   }
-  return canvas;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = "source-over";
+  ctx.globalAlpha = 1;
+  ctx.clearRect(0, 0, width, height);
+  return scratch;
 }
 
 function paintShadedSatinFloss(
@@ -2122,9 +2242,10 @@ function paintShadedSatinFloss(
   const res = 3;
   const pw = Math.max(1, Math.ceil(bw * res));
   const ph = Math.max(1, Math.ceil(bh * res));
-  const colorCanvas = scratchCanvas("color", pw, ph);
-  const g = colorCanvas.getContext("2d");
-  if (!g) return;
+  const colorScratch = scratchCanvas("color", pw, ph);
+  if (!colorScratch) return;
+  const colorCanvas = colorScratch.canvas;
+  const g = colorScratch.ctx;
 
   g.setTransform(res, 0, 0, res, 0, 0);
   g.translate(pad, bh / 2);
@@ -2143,11 +2264,11 @@ function paintShadedSatinFloss(
   }
   g.restore();
 
-  const maskCanvas = scratchCanvas("mask", pw, ph);
-  const mask = maskCanvas.getContext("2d");
-  if (!mask) return;
-  mask.setTransform(1, 0, 0, 1, 0, 0);
-  mask.drawImage(colorCanvas, 0, 0);
+  const maskScratch = scratchCanvas("mask", pw, ph);
+  if (!maskScratch) return;
+  const maskCanvas = maskScratch.canvas;
+  const mask = maskScratch.ctx;
+  mask.drawImage(colorCanvas, 0, 0, pw, ph, 0, 0, pw, ph);
 
   // Same side-to-side light as the satin cylinder: darken the shadow side, brighten the lit side.
   const loF = 0.72 - 0.18 * (1 - facing);
@@ -2195,10 +2316,10 @@ function paintShadedSatinFloss(
 
   g.globalCompositeOperation = "destination-in";
   g.setTransform(1, 0, 0, 1, 0, 0);
-  g.drawImage(maskCanvas, 0, 0);
+  g.drawImage(maskCanvas, 0, 0, pw, ph, 0, 0, pw, ph);
   g.globalCompositeOperation = "source-over";
 
-  ctx.drawImage(colorCanvas, x0 - pad, -bh / 2, bw, bh);
+  ctx.drawImage(colorCanvas, 0, 0, pw, ph, x0 - pad, -bh / 2, bw, bh);
 }
 
 function paintPuncture(

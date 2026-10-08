@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-geist), ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: #efe6d4;
+  color: #2a2118;
+  font-family: var(--font-sans);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.stitch-range {
+  appearance: none;
+  width: 100%;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.85;
+  cursor: pointer;
+}
+
+.stitch-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 3px rgba(255, 250, 243, 0.85);
+}
+
+.stitch-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 0;
+  border-radius: 999px;
+  background: currentColor;
+}

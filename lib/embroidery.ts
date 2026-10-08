@@ -1488,9 +1488,9 @@ function drawThread(
   paintFloss(ctx, [{ x: x1, y: y1 }, { x: x2, y: y2 }], color, width, clothDark);
 }
 
-const FLOSS_TILE_W = 90;
+const FLOSS_TILE_W = 64;
 const FLOSS_TILE_H = 48;
-const FLOSS_PITCH = 90;
+const FLOSS_PITCH = 64;
 const FLOSS_CORD = 30;
 
 const flossTiles = new Map<string, HTMLCanvasElement>();
@@ -1511,22 +1511,23 @@ function flossTile(color: string, clothDark: boolean) {
   const [r, gv, b] = hexToRgb(color);
   const mid = FLOSS_TILE_H / 2;
   const cord = FLOSS_CORD;
-  const amp = cord * 0.22;
+  const amp = cord * 0.3;
 
   g.lineCap = "round";
-  g.strokeStyle = rgba(tone(r, gv, b, clothDark ? 0.05 : 0.12), 0.28);
-  g.lineWidth = cord + 5;
+  g.lineJoin = "round";
+  g.strokeStyle = rgba(tone(r, gv, b, -0.2), 0.35);
+  g.lineWidth = cord + 4;
   g.beginPath();
   g.moveTo(-2, mid);
   g.lineTo(FLOSS_TILE_W + 2, mid);
   g.stroke();
 
   const tube = g.createLinearGradient(0, mid - cord / 2, 0, mid + cord / 2);
-  tube.addColorStop(0, rgba(tone(r, gv, b, -0.42), 1));
-  tube.addColorStop(0.28, rgba(tone(r, gv, b, -0.08), 1));
-  tube.addColorStop(0.46, rgba(tone(r, gv, b, clothDark ? 0.34 : 0.26), 1));
+  tube.addColorStop(0, rgba(tone(r, gv, b, -0.62), 1));
+  tube.addColorStop(0.22, rgba(tone(r, gv, b, -0.22), 1));
+  tube.addColorStop(0.4, rgba(tone(r, gv, b, clothDark ? 0.5 : 0.4), 1));
   tube.addColorStop(0.58, rgba([r, gv, b], 1));
-  tube.addColorStop(1, rgba(tone(r, gv, b, -0.5), 1));
+  tube.addColorStop(1, rgba(tone(r, gv, b, -0.68), 1));
   g.strokeStyle = tube;
   g.lineWidth = cord;
   g.beginPath();
@@ -1536,44 +1537,28 @@ function flossTile(color: string, clothDark: boolean) {
 
   g.save();
   g.beginPath();
-  g.rect(0, mid - cord / 2, FLOSS_TILE_W, cord);
+  g.rect(-8, mid - cord / 2, FLOSS_TILE_W + 16, cord);
   g.clip();
 
-  const sine = (side: number, shift: number) => {
+  const sine = (side: number) => {
     g.beginPath();
-    for (let x = -4; x <= FLOSS_TILE_W + 4; x += 2) {
-      const y = mid + Math.sin(((x + shift) / FLOSS_PITCH) * Math.PI * 2) * amp * side;
-      if (x === -4) g.moveTo(x, y);
+    for (let x = -6; x <= FLOSS_TILE_W + 6; x += 2) {
+      const y = mid + Math.sin((x / FLOSS_PITCH) * Math.PI * 2) * amp * side;
+      if (x === -6) g.moveTo(x, y);
       else g.lineTo(x, y);
     }
+    g.stroke();
   };
 
+  g.lineWidth = cord * 0.62;
+  g.strokeStyle = rgba(tone(r, gv, b, -0.55), 1);
+  sine(-1);
+  g.lineWidth = cord * 0.5;
+  g.strokeStyle = rgba(tone(r, gv, b, clothDark ? 0.22 : 0.1), 1);
+  sine(1);
   g.lineWidth = cord * 0.28;
-  g.strokeStyle = rgba(tone(r, gv, b, -0.32), 0.55);
-  sine(-1, 0);
-  g.stroke();
-  g.strokeStyle = rgba(tone(r, gv, b, clothDark ? 0.16 : 0.08), 0.7);
-  sine(1, 0);
-  g.stroke();
-
-  g.lineWidth = cord * 0.14;
-  g.strokeStyle = rgba(tone(r, gv, b, clothDark ? 0.48 : 0.36), 0.55);
-  sine(1, FLOSS_PITCH * 0.06);
-  g.stroke();
-
-  g.globalAlpha = 0.35;
-  g.lineWidth = 1.1;
-  for (let band = -2; band <= 2; band++) {
-    g.strokeStyle = rgba(tone(r, gv, b, band % 2 === 0 ? 0.4 : -0.25), 1);
-    g.beginPath();
-    const y = mid + band * cord * 0.16;
-    for (let x = 0; x <= FLOSS_TILE_W; x += 3) {
-      const wobble = Math.sin((x / FLOSS_PITCH) * Math.PI * 4 + band) * 0.6;
-      if (x === 0) g.moveTo(x, y + wobble);
-      else g.lineTo(x, y + wobble);
-    }
-    g.stroke();
-  }
+  g.strokeStyle = rgba(tone(r, gv, b, clothDark ? 0.82 : 0.68), 1);
+  sine(1);
   g.restore();
 
   flossTiles.set(key, canvas);

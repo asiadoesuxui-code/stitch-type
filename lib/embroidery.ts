@@ -9,7 +9,7 @@ export const STITCHES = [
     id: "satin",
     name: "Satin",
     label: "Satin stitch",
-    blurb: "Straight threads laid side by side in a single thread color.",
+    blurb: "Parallel threads laid edge to edge across each stroke.",
   },
   {
     id: "knot",
@@ -171,6 +171,7 @@ type NeedlePose = {
   sink: number;
   length: number;
   upright?: boolean;
+  quiet?: boolean;
   entry?: Point;
   exit?: Point;
 };
@@ -504,7 +505,7 @@ function crossChart(
   insetBottom: number,
   stitchScale: number,
 ) {
-  const cell = clampNum(16, 34, 22 * stitchScale);
+  const cell = clampNum(11, 22, 14 * stitchScale);
   const maxW = width * 0.9;
   const maxH = Math.max(48, (height - insetBottom) * 0.8);
   const cols = Math.max(6, Math.round(maxW / cell));
@@ -690,101 +691,589 @@ function collectSatin(
   clothDark: boolean,
   ranges: Array<[number, number]>,
 ) {
-  const box = bounds(mask.mask, mask.w, mask.h);
-  if (!box) return;
+  const spacing = clampNum(2.2, 3.2, 2.5 * options.scale);
+  const width = spacing * 1.42;
+  const strokes = satinStrokes(mask, spacing);
 
-  const angle = (-58 * Math.PI) / 180;
-  const dx = Math.cos(angle);
-  const dy = Math.sin(angle);
-  const nx = -dy;
-  const ny = dx;
-  const spacing = clampNum(2.4, 6.5, 3.5 * options.scale) * mask.scale;
-  const width = (spacing / mask.scale) * 0.82;
-  const hop = (spacing / mask.scale) * 3.2;
-  const runs: Array<{ x1: number; y1: number; x2: number; y2: number; mx: number; my: number }> = [];
-
-  const corners = [
-    { x: box.minX, y: box.minY },
-    { x: box.maxX, y: box.minY },
-    { x: box.minX, y: box.maxY },
-    { x: box.maxX, y: box.maxY },
-  ];
-  let minT = Infinity;
-  let maxT = -Infinity;
-  let minS = Infinity;
-  let maxS = -Infinity;
-  for (const corner of corners) {
-    const t = corner.x * nx + corner.y * ny;
-    const s = corner.x * dx + corner.y * dy;
-    minT = Math.min(minT, t);
-    maxT = Math.max(maxT, t);
-    minS = Math.min(minS, s);
-    maxS = Math.max(maxS, s);
-  }
-
-  for (let t = minT; t <= maxT; t += spacing) {
-    let runStart: number | null = null;
-    for (let s = minS; s <= maxS; s += 1) {
-      const x = Math.round(nx * t + dx * s);
-      const y = Math.round(ny * t + dy * s);
-      const on =
-        x >= 0 &&
-        y >= 0 &&
-        x < mask.w &&
-        y < mask.h &&
-        mask.mask[y * mask.w + x] === 1;
-      if (on && runStart === null) runStart = s;
-      if ((!on || s + 1 > maxS) && runStart !== null) {
-        const end = on ? s : s - 1;
-        if (end - runStart > 2) {
-          const x1 = (nx * t + dx * runStart) / mask.scale;
-          const y1 = (ny * t + dy * runStart) / mask.scale;
-          const x2 = (nx * t + dx * end) / mask.scale;
-          const y2 = (ny * t + dy * end) / mask.scale;
-          runs.push({ x1, y1, x2, y2, mx: (x1 + x2) / 2, my: (y1 + y2) / 2 });
-        }
-        runStart = null;
-      }
-    }
-  }
-
-  const neighbor = (spacing / mask.scale) * 2.4;
-  const chains: Array<typeof runs> = [];
-  for (const run of runs) {
-    let best = -1;
-    let bestD = neighbor;
-    for (let i = 0; i < chains.length; i++) {
-      const last = chains[i][chains[i].length - 1];
-      const dist = Math.hypot(run.mx - last.mx, run.my - last.my);
-      if (dist < bestD) {
-        best = i;
-        bestD = dist;
-      }
-    }
-    if (best >= 0) chains[best].push(run);
-    else chains.push([run]);
-  }
-  chains.sort((a, b) => a[0].mx - b[0].mx || a[0].my - b[0].my);
-
-  for (const chain of chains) {
-    for (let i = 0; i < chain.length; i++) {
-      const run = chain[i];
-      const forward = i % 2 === 0;
-      const ax = forward ? run.x1 : run.x2;
-      const ay = forward ? run.y1 : run.y2;
-      const bx = forward ? run.x2 : run.x1;
-      const by = forward ? run.y2 : run.y1;
-      pushThread(marks, ranges, ax, ay, bx, by, options.thread, width, clothDark);
-      const next = chain[i + 1];
+  for (const stroke of strokes) {
+    for (let i = 0; i < stroke.length; i++) {
+      const stitch = stroke[i];
+      pushThread(
+        marks,
+        ranges,
+        stitch.ax,
+        stitch.ay,
+        stitch.bx,
+        stitch.by,
+        options.thread,
+        width,
+        clothDark,
+        "satin",
+      );
+      const next = stroke[i + 1];
       if (!next) continue;
-      const nextForward = i % 2 === 1;
-      const nx = nextForward ? next.x1 : next.x2;
-      const ny = nextForward ? next.y1 : next.y2;
-      if (Math.hypot(bx - nx, by - ny) <= hop) {
-        pushUnder(marks, bx, by, nx, ny, charIndexAt(nx, ranges), clothDark);
+      const span = Math.hypot(stitch.bx - stitch.ax, stitch.by - stitch.ay);
+      const jump = Math.hypot(stitch.bx - next.ax, stitch.by - next.ay);
+      if (jump > Math.max(span * 1.45, spacing * 3)) continue;
+      pushSatinHop(marks, stitch.bx, stitch.by, next.ax, next.ay, charIndexAt(next.ax, ranges));
+    }
+  }
+}
+
+type SatinStitch = { ax: number; ay: number; bx: number; by: number };
+type SatinPoly = { pts: Point[]; closed: boolean };
+
+const SATIN_N8: Array<[number, number]> = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+  [1, 1],
+  [1, -1],
+  [-1, 1],
+  [-1, -1],
+];
+
+function satinStrokes(mask: Mask, spacingScreen: number) {
+  const box = bounds(mask.mask, mask.w, mask.h);
+  if (!box) return [] as SatinStitch[][];
+  const bw = box.maxX - box.minX + 1;
+  const bh = box.maxY - box.minY + 1;
+  let step = 2;
+  while ((bw / step) * (bh / step) > 260000 && step < 6) step += 1;
+
+  const gw = Math.ceil(bw / step) + 2;
+  const gh = Math.ceil(bh / step) + 2;
+  const grid = new Uint8Array(gw * gh);
+  for (let y = box.minY; y <= box.maxY; y++) {
+    const gy = 1 + Math.floor((y - box.minY) / step);
+    const row = y * mask.w;
+    for (let x = box.minX; x <= box.maxX; x++) {
+      if (!mask.mask[row + x]) continue;
+      grid[gy * gw + (1 + Math.floor((x - box.minX) / step))] = 1;
+    }
+  }
+
+  thinZhangSuen(grid, gw, gh);
+  const polys = traceSkeleton(grid, gw, gh);
+  const spacing = spacingScreen * mask.scale;
+  const strokes: SatinStitch[][] = [];
+
+  for (const poly of polys) {
+    if (poly.pts.length < 2) continue;
+    const mapped = poly.pts.map((point) => ({
+      x: box.minX + (point.x - 1 + 0.5) * step,
+      y: box.minY + (point.y - 1 + 0.5) * step,
+    }));
+    if (!poly.closed && polylineLength(mapped) < 3) continue;
+    const reached = poly.closed ? mapped : extendSatinEnds(mapped, mask);
+    const smooth = smoothPoly(reached, poly.closed, 6);
+    let samples = resamplePoly(smooth, spacing, poly.closed);
+    samples = orientSatin(samples, poly.closed);
+    if (samples.length < 2) continue;
+    const row = satinRow(samples, poly.closed, mask);
+    if (row.length) strokes.push(row);
+  }
+
+  strokes.sort((a, b) => {
+    const ax = Math.min(...a.map((stitch) => Math.min(stitch.ax, stitch.bx)));
+    const bx = Math.min(...b.map((stitch) => Math.min(stitch.ax, stitch.bx)));
+    const ay = Math.min(...a.map((stitch) => Math.min(stitch.ay, stitch.by)));
+    const by = Math.min(...b.map((stitch) => Math.min(stitch.ay, stitch.by)));
+    return ax - bx || ay - by;
+  });
+  return dropCoveredSpurs(strokes, spacingScreen);
+}
+
+function dropCoveredSpurs(strokes: SatinStitch[][], spacing: number) {
+  const reach = spacing * 1.8;
+  return strokes.filter((stroke) => {
+    if (stroke.length >= 3) return true;
+    return !stroke.every((stitch) => {
+      const mx = (stitch.ax + stitch.bx) / 2;
+      const my = (stitch.ay + stitch.by) / 2;
+      return strokes.some(
+        (other) =>
+          other !== stroke &&
+          other.length >= 3 &&
+          other.some((kept) => Math.hypot(mx - (kept.ax + kept.bx) / 2, my - (kept.ay + kept.by) / 2) < reach),
+      );
+    });
+  });
+}
+
+function satinRow(samples: Point[], closed: boolean, mask: Mask) {
+  const row: SatinStitch[] = [];
+  const n = samples.length;
+  if (n < 2) return row;
+  const slant = (-22 * Math.PI) / 180;
+  const cs = Math.cos(slant);
+  const sn = Math.sin(slant);
+  let prevX = 0;
+  let prevY = 0;
+  let hasPrev = false;
+
+  for (let i = 0; i < n; i++) {
+    let tx = 0;
+    let ty = 0;
+    if (!closed && i === 0) {
+      tx = samples[1].x - samples[0].x;
+      ty = samples[1].y - samples[0].y;
+    } else if (!closed && i === n - 1) {
+      tx = samples[n - 1].x - samples[n - 2].x;
+      ty = samples[n - 1].y - samples[n - 2].y;
+    } else {
+      const prev = samples[(i - 1 + n) % n];
+      const next = samples[(i + 1) % n];
+      tx = next.x - prev.x;
+      ty = next.y - prev.y;
+    }
+    const tangent = unit(tx, ty);
+    let px = tangent.y;
+    let py = -tangent.x;
+    let ax = px * cs - py * sn;
+    let ay = px * sn + py * cs;
+    const axis = unit(ax, ay);
+    ax = axis.x;
+    ay = axis.y;
+    if (hasPrev && prevX * ax + prevY * ay < 0) {
+      ax = -ax;
+      ay = -ay;
+    }
+    prevX = ax;
+    prevY = ay;
+    hasPrev = true;
+
+    const local = localSatinWidth(mask, samples[i].x, samples[i].y);
+    const jitter = ((((i * 47) % 11) - 5) / 5) * 0.02;
+    const jx = ax * Math.cos(jitter) - ay * Math.sin(jitter);
+    const jy = ax * Math.sin(jitter) + ay * Math.cos(jitter);
+    const hit = castSatin(mask, samples[i].x, samples[i].y, jx, jy, local);
+    if (hit) row.push(hit);
+  }
+  return row;
+}
+
+function localSatinWidth(mask: Mask, x: number, y: number) {
+  let best = Infinity;
+  for (let k = 0; k < 8; k++) {
+    const angle = (k / 8) * Math.PI;
+    const dx = Math.cos(angle);
+    const dy = Math.sin(angle);
+    const len =
+      walkSatin(mask, x, y, dx, dy).dist + walkSatin(mask, x, y, -dx, -dy).dist;
+    if (len < best) best = len;
+  }
+  return best;
+}
+
+function castSatin(mask: Mask, x: number, y: number, dx: number, dy: number, local: number) {
+  if (!maskPixel(mask, x, y)) return null;
+  const cap = Math.max(4, local * 1.2);
+  const forward = walkSatin(mask, x, y, dx, dy, cap);
+  const back = walkSatin(mask, x, y, -dx, -dy, cap);
+  const len = forward.dist + back.dist;
+  if (len < 3.2) return null;
+
+  let x1 = back.x / mask.scale;
+  let y1 = back.y / mask.scale;
+  let x2 = forward.x / mask.scale;
+  let y2 = forward.y / mask.scale;
+  const span = Math.hypot(x2 - x1, y2 - y1);
+  if (span < 1.8) return null;
+  const hash =
+    Math.imul(Math.round(x1 * 13) ^ Math.imul(Math.round(y1 * 13), 374761393), 668265263) >>> 0;
+  const inset = Math.min(span * 0.08, 0.08 + (hash % 6) * 0.1);
+  const ux = (x2 - x1) / span;
+  const uy = (y2 - y1) / span;
+  x1 += ux * inset;
+  y1 += uy * inset;
+  x2 -= ux * inset;
+  y2 -= uy * inset;
+  return { ax: x1, ay: y1, bx: x2, by: y2 };
+}
+
+function walkSatin(
+  mask: Mask,
+  x: number,
+  y: number,
+  dx: number,
+  dy: number,
+  maxDist = Infinity,
+) {
+  let cx = x;
+  let cy = y;
+  let dist = 0;
+  const step = 0.7;
+  for (let i = 0; i < 500 && dist < maxDist; i++) {
+    const room = Math.min(step, maxDist - dist);
+    const nx = cx + dx * room;
+    const ny = cy + dy * room;
+    if (!maskPixel(mask, nx, ny)) break;
+    cx = nx;
+    cy = ny;
+    dist += room;
+  }
+  return { x: cx, y: cy, dist };
+}
+
+function maskPixel(mask: Mask, x: number, y: number) {
+  const ix = Math.round(x);
+  const iy = Math.round(y);
+  if (ix < 0 || iy < 0 || ix >= mask.w || iy >= mask.h) return false;
+  return mask.mask[iy * mask.w + ix] === 1;
+}
+
+function pushSatinHop(
+  marks: SewMark[],
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  charIndex: number,
+) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const len = Math.hypot(dx, dy);
+  if (len < 0.8) return;
+  marks.push({
+    charIndex,
+    weight: 0.22,
+    draw() {},
+    needle(amount) {
+      return {
+        x: x1 + dx * amount,
+        y: y1 + dy * amount,
+        angle: Math.atan2(dy, dx),
+        sink: 1,
+        length: 11,
+        quiet: true,
+        exit: { x: x1, y: y1 },
+        entry: amount > 0.62 ? { x: x2, y: y2 } : undefined,
+      };
+    },
+  });
+}
+
+function thinZhangSuen(grid: Uint8Array, w: number, h: number) {
+  const kill = new Uint8Array(grid.length);
+  const at = (x: number, y: number) => grid[y * w + x];
+  let changed = true;
+  for (let guard = 0; changed && guard < 80; guard++) {
+    changed = false;
+    for (let pass = 0; pass < 2; pass++) {
+      kill.fill(0);
+      for (let y = 1; y < h - 1; y++) {
+        for (let x = 1; x < w - 1; x++) {
+          const i = y * w + x;
+          if (!grid[i]) continue;
+          const p2 = at(x, y - 1);
+          const p3 = at(x + 1, y - 1);
+          const p4 = at(x + 1, y);
+          const p5 = at(x + 1, y + 1);
+          const p6 = at(x, y + 1);
+          const p7 = at(x - 1, y + 1);
+          const p8 = at(x - 1, y);
+          const p9 = at(x - 1, y - 1);
+          const neighbors = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+          if (neighbors < 2 || neighbors > 6) continue;
+          const seq = [p2, p3, p4, p5, p6, p7, p8, p9, p2];
+          let turns = 0;
+          for (let k = 0; k < 8; k++) if (seq[k] === 0 && seq[k + 1] === 1) turns++;
+          if (turns !== 1) continue;
+          if (pass === 0) {
+            if (p2 * p4 * p6 !== 0) continue;
+            if (p4 * p6 * p8 !== 0) continue;
+          } else if (p2 * p4 * p8 !== 0 || p2 * p6 * p8 !== 0) continue;
+          kill[i] = 1;
+        }
+      }
+      for (let i = 0; i < grid.length; i++) {
+        if (!kill[i]) continue;
+        grid[i] = 0;
+        changed = true;
       }
     }
   }
+}
+
+function traceSkeleton(grid: Uint8Array, w: number, h: number) {
+  const deg = new Uint8Array(grid.length);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      if (!grid[i]) continue;
+      let count = 0;
+      for (const [dx, dy] of SATIN_N8) if (grid[(y + dy) * w + (x + dx)]) count++;
+      deg[i] = count;
+    }
+  }
+
+  const used = new Set<string>();
+  const edgeKey = (x1: number, y1: number, x2: number, y2: number) => {
+    const a = y1 * w + x1;
+    const b = y2 * w + x2;
+    return a < b ? `${a}:${b}` : `${b}:${a}`;
+  };
+  const neighborsOf = (x: number, y: number) => {
+    const found: Point[] = [];
+    for (const [dx, dy] of SATIN_N8) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (grid[ny * w + nx]) found.push({ x: nx, y: ny });
+    }
+    return found;
+  };
+
+  const walk = (x0: number, y0: number, x1: number, y1: number) => {
+    const pts: Point[] = [
+      { x: x0, y: y0 },
+      { x: x1, y: y1 },
+    ];
+    used.add(edgeKey(x0, y0, x1, y1));
+    let px = x0;
+    let py = y0;
+    let cx = x1;
+    let cy = y1;
+    for (let guard = 0; deg[cy * w + cx] === 2 && guard < w * h; guard++) {
+      let nxt: Point | null = null;
+      for (const point of neighborsOf(cx, cy)) {
+        if (point.x === px && point.y === py) continue;
+        nxt = point;
+        break;
+      }
+      if (!nxt) break;
+      if (nxt.x === x0 && nxt.y === y0) {
+        used.add(edgeKey(cx, cy, nxt.x, nxt.y));
+        return { pts, closed: true };
+      }
+      const id = edgeKey(cx, cy, nxt.x, nxt.y);
+      if (used.has(id)) break;
+      used.add(id);
+      pts.push(nxt);
+      px = cx;
+      py = cy;
+      cx = nxt.x;
+      cy = nxt.y;
+    }
+    return { pts, closed: false };
+  };
+
+  const open: SatinPoly[] = [];
+  const closed: SatinPoly[] = [];
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const count = deg[y * w + x];
+      if (count !== 1 && count < 3) continue;
+      for (const next of neighborsOf(x, y)) {
+        if (used.has(edgeKey(x, y, next.x, next.y))) continue;
+        const poly = walk(x, y, next.x, next.y);
+        if (poly.pts.length < 2) continue;
+        if (poly.closed) closed.push(poly);
+        else open.push(poly);
+      }
+    }
+  }
+
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      if (deg[y * w + x] !== 2) continue;
+      const next = neighborsOf(x, y);
+      if (next.length < 1) continue;
+      if (used.has(edgeKey(x, y, next[0].x, next[0].y))) continue;
+      const poly = walk(x, y, next[0].x, next[0].y);
+      if (poly.closed && poly.pts.length > 4) closed.push(poly);
+    }
+  }
+
+  return closed.concat(mergeSatinEdges(open));
+}
+
+function mergeSatinEdges(open: SatinPoly[]) {
+  const used = new Array(open.length).fill(false);
+  const touch = new Map<string, number[]>();
+  const keyOf = (point: Point) => `${point.x},${point.y}`;
+  for (let i = 0; i < open.length; i++) {
+    const pts = open[i].pts;
+    const start = keyOf(pts[0]);
+    const end = keyOf(pts[pts.length - 1]);
+    for (const key of start === end ? [start] : [start, end]) {
+      const list = touch.get(key);
+      if (list) list.push(i);
+      else touch.set(key, [i]);
+    }
+  }
+
+  const orient = (pts: Point[], key: string) => {
+    const start = keyOf(pts[0]) === key;
+    const end = keyOf(pts[pts.length - 1]) === key;
+    if (start && !end) return pts;
+    if (end && !start) return pts.slice().reverse();
+    return null;
+  };
+
+  const approachEnd = (pts: Point[]) => {
+    const q = pts[Math.max(0, pts.length - 5)];
+    return unit(pts[pts.length - 1].x - q.x, pts[pts.length - 1].y - q.y);
+  };
+  const approachStart = (pts: Point[]) => {
+    const q = pts[Math.min(4, pts.length - 1)];
+    return unit(pts[0].x - q.x, pts[0].y - q.y);
+  };
+  const depart = (pts: Point[]) => {
+    const q = pts[Math.min(4, pts.length - 1)];
+    return unit(q.x - pts[0].x, q.y - pts[0].y);
+  };
+
+  const continuation = (key: string, approach: Point) => {
+    const list = touch.get(key) ?? [];
+    let best = -1;
+    let bestDot = 0.6;
+    let pts: Point[] | null = null;
+    for (const index of list) {
+      if (used[index]) continue;
+      const oriented = orient(open[index].pts, key);
+      if (!oriented || oriented.length < 2) continue;
+      const dir = depart(oriented);
+      const dot = approach.x * dir.x + approach.y * dir.y;
+      if (dot <= bestDot) continue;
+      bestDot = dot;
+      best = index;
+      pts = oriented;
+    }
+    if (best < 0 || !pts) return null;
+    used[best] = true;
+    return pts;
+  };
+
+  const merged: SatinPoly[] = [];
+  for (let i = 0; i < open.length; i++) {
+    if (used[i]) continue;
+    used[i] = true;
+    let pts = open[i].pts.slice();
+    for (let guard = 0; guard < open.length; guard++) {
+      const next = continuation(keyOf(pts[pts.length - 1]), approachEnd(pts));
+      if (!next) break;
+      pts = pts.concat(next.slice(1));
+    }
+    for (let guard = 0; guard < open.length; guard++) {
+      const next = continuation(keyOf(pts[0]), approachStart(pts));
+      if (!next) break;
+      pts = next.slice(1).reverse().concat(pts);
+    }
+    if (polylineLength(pts) >= 1.5) merged.push({ pts, closed: false });
+  }
+  return merged;
+}
+
+function orientSatin(samples: Point[], closed: boolean) {
+  if (samples.length < 2) return samples;
+  if (closed) {
+    let min = 0;
+    for (let i = 1; i < samples.length; i++) {
+      const better =
+        samples[i].y < samples[min].y - 0.5 ||
+        (Math.abs(samples[i].y - samples[min].y) <= 0.5 && samples[i].x < samples[min].x);
+      if (better) min = i;
+    }
+    return samples.slice(min).concat(samples.slice(0, min));
+  }
+  const start = samples[0];
+  const end = samples[samples.length - 1];
+  const keep =
+    start.y < end.y - 1 || (Math.abs(start.y - end.y) <= 1 && start.x <= end.x);
+  return keep ? samples : samples.slice().reverse();
+}
+
+function extendSatinEnds(pts: Point[], mask: Mask) {
+  if (pts.length < 2) return pts;
+  const grow = (origin: Point, toward: Point) => {
+    const dir = unit(origin.x - toward.x, origin.y - toward.y);
+    let x = origin.x;
+    let y = origin.y;
+    for (let i = 0; i < 100; i++) {
+      const nx = x + dir.x * 1.1;
+      const ny = y + dir.y * 1.1;
+      if (!maskPixel(mask, nx, ny)) break;
+      x = nx;
+      y = ny;
+    }
+    return { x, y };
+  };
+  return [grow(pts[0], pts[1]), ...pts.slice(1, -1), grow(pts[pts.length - 1], pts[pts.length - 2])];
+}
+
+function smoothPoly(pts: Point[], closed: boolean, passes = 2) {
+  if (pts.length < 3) return pts.map((point) => ({ ...point }));
+  let cur = pts.map((point) => ({ ...point }));
+  for (let pass = 0; pass < passes; pass++) {
+    const next = cur.map((point) => ({ ...point }));
+    const n = cur.length;
+    for (let i = 0; i < n; i++) {
+      if (!closed && (i === 0 || i === n - 1)) continue;
+      const prev = cur[(i - 1 + n) % n];
+      const point = cur[i];
+      const following = cur[(i + 1) % n];
+      next[i] = {
+        x: (prev.x + point.x * 2 + following.x) / 4,
+        y: (prev.y + point.y * 2 + following.y) / 4,
+      };
+    }
+    cur = next;
+  }
+  return cur;
+}
+
+function resamplePoly(pts: Point[], spacing: number, closed: boolean) {
+  const seq = closed && pts.length > 2 ? pts.concat([pts[0]]) : pts;
+  const out: Point[] = [];
+  if (!seq.length) return out;
+  out.push({ ...seq[0] });
+  let cursor = seq[0];
+  let carried = 0;
+  for (let i = 1; i < seq.length; i++) {
+    const target = seq[i];
+    let dx = target.x - cursor.x;
+    let dy = target.y - cursor.y;
+    let dist = Math.hypot(dx, dy);
+    if (dist < 1e-4) continue;
+    while (carried + dist >= spacing) {
+      const t = (spacing - carried) / dist;
+      cursor = { x: cursor.x + dx * t, y: cursor.y + dy * t };
+      out.push(cursor);
+      dx = target.x - cursor.x;
+      dy = target.y - cursor.y;
+      dist = Math.hypot(dx, dy);
+      carried = 0;
+      if (dist < 1e-4) break;
+    }
+    carried += dist;
+    cursor = target;
+  }
+  if (!closed && out.length) {
+    const last = seq[seq.length - 1];
+    const end = out[out.length - 1];
+    if (Math.hypot(last.x - end.x, last.y - end.y) > 1.5) out.push({ ...last });
+  }
+  if (closed && out.length > 2) {
+    const a = out[0];
+    const b = out[out.length - 1];
+    if (Math.hypot(a.x - b.x, a.y - b.y) < spacing * 0.45) out.pop();
+  }
+  return out;
+}
+
+function polylineLength(pts: Point[]) {
+  let length = 0;
+  for (let i = 1; i < pts.length; i++) {
+    length += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+  }
+  return length;
+}
+
+function unit(x: number, y: number) {
+  const length = Math.hypot(x, y) || 1;
+  return { x: x / length, y: y / length };
 }
 
 function collectKnots(
@@ -898,7 +1387,7 @@ function drawKnot(
     const a = arc0 + ((arc1 - arc0) * i) / 20;
     wrap.push({ x: Math.cos(a) * r, y: Math.sin(a) * r * 0.92 });
   }
-  paintFloss(ctx, wrap, thread, Math.max(1.35, radius * 0.62), clothDark);
+  paintFloss(ctx, wrap, thread, Math.max(0.9, radius * 0.42), clothDark, true, "none");
 
   const nub = Math.max(1.15, radius * 0.32);
   const [ar, ag, ab] = hexToRgb(accent);
@@ -1026,7 +1515,7 @@ function collectChain(
           const steps = Math.max(4, Math.round(18 * tip));
           const points: Point[] = [];
           for (let step = 0; step <= steps; step++) points.push(loopAt((step / steps) * tip));
-          strokeThread(ctx, points, options.thread, width, clothDark);
+          strokeThread(ctx, points, options.thread, width, clothDark, "entry");
         },
         needle(amount) {
           const phase = stabPhase(amount, true, true);
@@ -1159,26 +1648,35 @@ function pushThread(
   color: string,
   width: number,
   clothDark: boolean,
-  mode: "stab" | "glide" = "stab",
+  mode: "stab" | "glide" | "satin" = "stab",
 ) {
   const pieces = cutSegment(x1, y1, x2, y2, ranges);
+  const castShadow = mode !== "satin";
   pieces.forEach((piece, index) => {
-    const lead = mode === "stab" && index === 0;
-    const tail = mode === "stab" && index === pieces.length - 1;
+    const lead = mode !== "glide" && index === 0;
+    const tail = mode !== "glide" && index === pieces.length - 1;
     const dx = piece.x2 - piece.x1;
     const dy = piece.y2 - piece.y1;
     const len = Math.hypot(dx, dy) || 1;
     const needleLen = Math.min(13, Math.max(6.5, len * 0.36));
+    const phaseOf = (amount: number) =>
+      mode === "satin"
+        ? stabPhase(amount, lead, tail, lead ? 0.08 : 0, tail ? 0.1 : 0)
+        : stabPhase(amount, lead, tail);
+    const weight =
+      mode === "satin"
+        ? Math.max(1.05, Math.min(2.6, len / 14))
+        : (mode === "glide" ? 0.38 : 1) * Math.max(0.45, Math.min(3.4, len / 12));
     marks.push({
       charIndex: piece.charIndex,
-      weight: (mode === "glide" ? 0.38 : 1) * Math.max(0.45, Math.min(3.4, len / 12)),
+      weight,
       draw(ctx, amount) {
         if (amount <= 0) return;
         if (amount >= 1) {
-          drawThread(ctx, piece.x1, piece.y1, piece.x2, piece.y2, color, width, clothDark);
+          drawThread(ctx, piece.x1, piece.y1, piece.x2, piece.y2, color, width, clothDark, castShadow, "both");
           return;
         }
-        const phase = stabPhase(amount, lead, tail);
+        const phase = phaseOf(amount);
         if (phase.t <= 0) return;
         const eye = needleLen * 0.58;
         const tip = len * phase.t;
@@ -1195,10 +1693,12 @@ function pushThread(
           color,
           width,
           clothDark,
+          castShadow,
+          "entry",
         );
       },
       needle(amount) {
-        const phase = stabPhase(amount, lead, tail);
+        const phase = phaseOf(amount);
         return {
           x: piece.x1 + dx * phase.t,
           y: piece.y1 + dy * phase.t,
@@ -1206,7 +1706,7 @@ function pushThread(
           sink: phase.sink,
           length: needleLen,
           entry: lead ? { x: piece.x1, y: piece.y1 } : undefined,
-          exit: tail && phase.t > 0.78 ? { x: piece.x2, y: piece.y2 } : undefined,
+          exit: tail && phase.t > 0.72 ? { x: piece.x2, y: piece.y2 } : undefined,
         };
       },
     });
@@ -1221,6 +1721,7 @@ function pushUnder(
   y2: number,
   charIndex: number,
   clothDark: boolean,
+  weight?: number,
 ) {
   const dx = x2 - x1;
   const dy = y2 - y1;
@@ -1228,7 +1729,7 @@ function pushUnder(
   if (len < 0.8) return;
   marks.push({
     charIndex,
-    weight: Math.max(0.85, Math.min(1.6, len / 16)),
+    weight: weight ?? Math.max(0.85, Math.min(1.6, len / 16)),
     draw(ctx, amount) {
       if (amount <= 0.01 || amount >= 1) return;
       drawBuriedThread(ctx, x1, y1, x1 + dx * amount, y1 + dy * amount, clothDark);
@@ -1246,9 +1747,15 @@ function pushUnder(
   });
 }
 
-function stabPhase(amount: number, lead: boolean, tail: boolean) {
-  const up = lead ? 0.18 : 0;
-  const down = tail ? 0.16 : 0;
+function stabPhase(
+  amount: number,
+  lead: boolean,
+  tail: boolean,
+  rise = lead ? 0.18 : 0,
+  sink = tail ? 0.16 : 0,
+) {
+  const up = rise;
+  const down = sink;
   const span = Math.max(0.05, 1 - up - down);
   if (amount <= up) {
     return { t: 0, sink: up === 0 ? 0 : 1 - amount / up };
@@ -1273,8 +1780,9 @@ function strokeThread(
   color: string,
   width: number,
   clothDark: boolean,
+  ends: ThreadEnd = "both",
 ) {
-  paintFloss(ctx, points, color, width, clothDark);
+  paintFloss(ctx, points, color, width, clothDark, true, ends);
 }
 
 function drawCoil(
@@ -1295,7 +1803,7 @@ function drawCoil(
     const r = radius * (1 - 0.12 * (i / steps));
     points.push({ x: x + Math.cos(a) * r, y: y + Math.sin(a) * r });
   }
-  strokeThread(ctx, points, color, Math.max(1.15, radius * 0.34), clothDark);
+  strokeThread(ctx, points, color, Math.max(0.75, radius * 0.22), clothDark, "none");
 }
 
 function drawBuriedThread(
@@ -1308,14 +1816,14 @@ function drawBuriedThread(
 ) {
   ctx.save();
   ctx.lineCap = "round";
-  ctx.strokeStyle = clothDark ? "rgba(255,255,255,0.13)" : "rgba(62, 38, 22, 0.16)";
-  ctx.lineWidth = 5;
+  ctx.strokeStyle = clothDark ? "rgba(255,255,255,0.1)" : "rgba(62, 38, 22, 0.14)";
+  ctx.lineWidth = 1.7;
   ctx.beginPath();
   ctx.moveTo(x1, y1);
   ctx.lineTo(x2, y2);
   ctx.stroke();
-  ctx.strokeStyle = clothDark ? "rgba(0,0,0,0.2)" : "rgba(255, 248, 236, 0.42)";
-  ctx.lineWidth = 1.4;
+  ctx.strokeStyle = clothDark ? "rgba(0,0,0,0.16)" : "rgba(255, 248, 236, 0.32)";
+  ctx.lineWidth = 0.55;
   ctx.stroke();
   ctx.restore();
 }
@@ -1324,7 +1832,7 @@ function drawNeedle(ctx: CanvasRenderingContext2D, pose: NeedlePose, clothDark: 
   const sink = Math.max(0, Math.min(1, pose.sink));
   if (pose.entry && sink < 0.98) drawHole(ctx, pose.entry.x, pose.entry.y, clothDark);
   if (pose.exit && sink > 0.12) drawHole(ctx, pose.exit.x, pose.exit.y, clothDark);
-  if (sink > 0.4) drawDimple(ctx, pose, clothDark);
+  if (sink > 0.4 && !pose.quiet) drawDimple(ctx, pose, clothDark);
   if (pose.upright) {
     drawUprightNeedle(ctx, pose, sink, clothDark);
     return;
@@ -1475,6 +1983,8 @@ function cutSegment(
   return pieces;
 }
 
+type ThreadEnd = "both" | "entry" | "none";
+
 function drawThread(
   ctx: CanvasRenderingContext2D,
   x1: number,
@@ -1484,14 +1994,241 @@ function drawThread(
   color: string,
   width: number,
   clothDark: boolean,
+  castShadow = true,
+  ends: ThreadEnd = "both",
 ) {
-  paintFloss(ctx, [{ x: x1, y: y1 }, { x: x2, y: y2 }], color, width, clothDark);
+  if (!castShadow) {
+    paintSatinStrand(ctx, x1, y1, x2, y2, color, width, clothDark, ends);
+    return;
+  }
+  paintFloss(ctx, [{ x: x1, y: y1 }, { x: x2, y: y2 }], color, width, clothDark, castShadow, ends);
 }
 
-const FLOSS_TILE_W = 64;
-const FLOSS_TILE_H = 48;
-const FLOSS_PITCH = 64;
-const FLOSS_CORD = 30;
+function paintSatinStrand(
+  ctx: CanvasRenderingContext2D,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  color: string,
+  width: number,
+  clothDark: boolean,
+  ends: ThreadEnd,
+) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const len = Math.hypot(dx, dy);
+  if (len < 0.35) return;
+  const [r, g, b] = hexToRgb(color);
+  const w = Math.max(1, width);
+  const radius = w / 2;
+  const x0 = ends === "none" ? 0 : Math.min(radius, len * 0.42);
+  const x1b = ends === "both" ? Math.max(x0 + 0.35, len - radius) : len;
+  const angle = Math.atan2(dy, dx);
+  const tx = Math.cos(angle);
+  const ty = Math.sin(angle);
+  // Light sits up and to the left, above the cloth.
+  const lx = -0.4;
+  const ly = -0.92;
+  const along = tx * lx + ty * ly;
+  const facing = Math.sqrt(Math.max(0, 1 - along * along));
+  const across = 0.4 * Math.sin(angle) - 0.92 * Math.cos(angle);
+  const lift = Math.abs(across) < 0.2 ? (across < 0 ? -0.2 : 0.2) : across;
+  const seed = threadPhase(x1, y1);
+  const glint = facing * (0.28 + 0.72 * (0.5 + 0.5 * Math.sin(seed)));
+  const strand = w * 0.74;
+
+  ctx.save();
+  ctx.translate(x1, y1);
+  ctx.rotate(angle);
+  ctx.lineCap = "round";
+
+  if (ends !== "none") paintPuncture(ctx, 0, 0, w * 0.45, clothDark);
+  if (ends === "both") paintPuncture(ctx, len, 0, w * 0.45, clothDark);
+
+  ctx.beginPath();
+  ctx.rect(-0.15, -w, len + 0.3, w * 2);
+  ctx.clip();
+
+  const shadowY = -0.45 * Math.sin(angle) + 0.8 * Math.cos(angle);
+  const mid0 = x0 + (x1b - x0) * 0.12;
+  const mid1 = x1b - (x1b - x0) * 0.12;
+  ctx.strokeStyle = clothDark ? "rgba(0,0,0,0.45)" : "rgba(42, 24, 14, 0.9)";
+  ctx.globalAlpha = clothDark ? 0.28 : 0.2;
+  ctx.lineWidth = strand * 1.05;
+  ctx.beginPath();
+  ctx.moveTo(mid0, shadowY);
+  ctx.lineTo(mid1, shadowY);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  paintShadedSatinFloss(ctx, x0, x1b, strand, color, clothDark, seed, facing, lift);
+
+  const sheenY = lift * strand * 0.16;
+  const sheen = (alpha: number, liftTone: number, line: number) => {
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = rgba(tone(r, g, b, liftTone), 1);
+    ctx.lineWidth = line;
+    ctx.beginPath();
+    ctx.moveTo(x0, sheenY);
+    ctx.lineTo(x1b, sheenY);
+    ctx.stroke();
+  };
+  sheen(0.1 + 0.16 * glint, 0.28, strand * 0.42);
+  sheen(0.08 + 0.34 * glint, 0.48, strand * 0.22);
+  if (glint > 0.55) sheen(0.22 + 0.4 * glint, 0.72, Math.max(0.35, strand * 0.1));
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+const satinScratch: { color: HTMLCanvasElement | null; mask: HTMLCanvasElement | null } = {
+  color: null,
+  mask: null,
+};
+
+function scratchCanvas(slot: "color" | "mask", width: number, height: number) {
+  let canvas = satinScratch[slot];
+  if (!canvas) {
+    canvas = document.createElement("canvas");
+    satinScratch[slot] = canvas;
+  }
+  const g = canvas.getContext("2d");
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  } else if (g) {
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalCompositeOperation = "source-over";
+    g.clearRect(0, 0, width, height);
+  }
+  return canvas;
+}
+
+function paintShadedSatinFloss(
+  ctx: CanvasRenderingContext2D,
+  x0: number,
+  x1b: number,
+  strand: number,
+  color: string,
+  clothDark: boolean,
+  seed: number,
+  facing: number,
+  lift: number,
+) {
+  const spanPx = Math.max(0.4, x1b - x0);
+  const pad = strand;
+  const bw = spanPx + pad * 2;
+  const bh = strand * 2.4;
+  const res = 3;
+  const pw = Math.max(1, Math.ceil(bw * res));
+  const ph = Math.max(1, Math.ceil(bh * res));
+  const colorCanvas = scratchCanvas("color", pw, ph);
+  const g = colorCanvas.getContext("2d");
+  if (!g) return;
+
+  g.setTransform(res, 0, 0, res, 0, 0);
+  g.translate(pad, bh / 2);
+
+  const plySpan = 0.82;
+  const scale = Math.max(1.05, strand) / (FLOSS_CORD * plySpan);
+  const tileSpan = spanPx / scale;
+  const phase = (seed / (Math.PI * 2)) * FLOSS_TILE_W;
+  const origin = -(((phase % FLOSS_TILE_W) + FLOSS_TILE_W) % FLOSS_TILE_W);
+  const tile = flossTile(color, clothDark);
+  g.save();
+  g.scale(scale, scale);
+  clipStrand(g, tileSpan, (FLOSS_CORD * plySpan) / 2, false, false);
+  for (let x = origin - FLOSS_TILE_W; x < tileSpan + FLOSS_CORD; x += FLOSS_TILE_W) {
+    g.drawImage(tile, x, -FLOSS_TILE_H / 2, FLOSS_TILE_W, FLOSS_TILE_H);
+  }
+  g.restore();
+
+  const maskCanvas = scratchCanvas("mask", pw, ph);
+  const mask = maskCanvas.getContext("2d");
+  if (!mask) return;
+  mask.setTransform(1, 0, 0, 1, 0, 0);
+  mask.drawImage(colorCanvas, 0, 0);
+
+  // Same side-to-side light as the satin cylinder: darken the shadow side, brighten the lit side.
+  const loF = 0.72 - 0.18 * (1 - facing);
+  const hiLift = 0.08 + 0.22 * facing;
+  const gray = (factor: number) => {
+    const v = clamp(factor * 255);
+    return `rgb(${v},${v},${v})`;
+  };
+  const mul = g.createLinearGradient(0, -strand / 2, 0, strand / 2);
+  const add = g.createLinearGradient(0, -strand / 2, 0, strand / 2);
+  if (lift >= 0) {
+    mul.addColorStop(0, gray(loF));
+    mul.addColorStop(0.38, gray(0.92));
+    mul.addColorStop(0.62, gray(1));
+    mul.addColorStop(1, gray(1));
+    add.addColorStop(0, gray(0));
+    add.addColorStop(0.62, gray(0));
+    add.addColorStop(1, gray(hiLift));
+  } else {
+    mul.addColorStop(0, gray(1));
+    mul.addColorStop(0.38, gray(1));
+    mul.addColorStop(0.62, gray(0.92));
+    mul.addColorStop(1, gray(loF));
+    add.addColorStop(0, gray(hiLift));
+    add.addColorStop(0.38, gray(0));
+    add.addColorStop(1, gray(0));
+  }
+
+  g.lineCap = "butt";
+  g.globalAlpha = 1;
+  g.globalCompositeOperation = "multiply";
+  g.strokeStyle = mul;
+  g.lineWidth = strand;
+  g.beginPath();
+  g.moveTo(0, 0);
+  g.lineTo(spanPx, 0);
+  g.stroke();
+
+  g.globalCompositeOperation = "screen";
+  g.strokeStyle = add;
+  g.beginPath();
+  g.moveTo(0, 0);
+  g.lineTo(spanPx, 0);
+  g.stroke();
+
+  g.globalCompositeOperation = "destination-in";
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.drawImage(maskCanvas, 0, 0);
+  g.globalCompositeOperation = "source-over";
+
+  ctx.drawImage(colorCanvas, x0 - pad, -bh / 2, bw, bh);
+}
+
+function paintPuncture(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  threadW: number,
+  clothDark: boolean,
+) {
+  const r = Math.max(0.38, Math.min(0.7, threadW * 0.16));
+  ctx.save();
+  ctx.fillStyle = clothDark ? "rgba(255,255,255,0.05)" : "rgba(58, 36, 18, 0.1)";
+  ctx.beginPath();
+  ctx.ellipse(x, y + r * 0.12, r * 1.25, r * 0.72, 0.4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = clothDark ? "rgba(0,0,0,0.82)" : "rgba(22, 11, 6, 0.78)";
+  ctx.beginPath();
+  ctx.ellipse(x + 0.03, y + 0.05, r * 0.62, r * 0.46, 0.55, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = clothDark ? "rgba(255,255,255,0.2)" : "rgba(255, 250, 242, 0.75)";
+  ctx.lineWidth = 0.35;
+  ctx.beginPath();
+  ctx.ellipse(x - 0.04, y - 0.06, r * 0.9, r * 0.55, 0.55, Math.PI * 1.05, Math.PI * 1.95);
+  ctx.stroke();
+  ctx.restore();
+}
+
+const FLOSS_TILE_W = 48;
+const FLOSS_TILE_H = 36;
+const FLOSS_CORD = 22;
 
 const flossTiles = new Map<string, HTMLCanvasElement>();
 
@@ -1511,55 +2248,29 @@ function flossTile(color: string, clothDark: boolean) {
   const [r, gv, b] = hexToRgb(color);
   const mid = FLOSS_TILE_H / 2;
   const cord = FLOSS_CORD;
-  const amp = cord * 0.3;
+  const plies = [
+    { phase: 0.2, amp: 0.11, lift: -0.22, tone: -0.24, width: 0.2, alpha: 0.96 },
+    { phase: 2.2, amp: 0.1, lift: 0.0, tone: 0.0, width: 0.18, alpha: 0.94 },
+    { phase: 4.1, amp: 0.09, lift: 0.22, tone: -0.34, width: 0.16, alpha: 0.92 },
+    { phase: 1.3, amp: 0.07, lift: -0.06, tone: clothDark ? 0.42 : 0.26, width: 0.08, alpha: 0.6 },
+  ];
 
   g.lineCap = "round";
   g.lineJoin = "round";
-  g.strokeStyle = rgba(tone(r, gv, b, -0.2), 0.35);
-  g.lineWidth = cord + 4;
-  g.beginPath();
-  g.moveTo(-2, mid);
-  g.lineTo(FLOSS_TILE_W + 2, mid);
-  g.stroke();
-
-  const tube = g.createLinearGradient(0, mid - cord / 2, 0, mid + cord / 2);
-  tube.addColorStop(0, rgba(tone(r, gv, b, -0.62), 1));
-  tube.addColorStop(0.22, rgba(tone(r, gv, b, -0.22), 1));
-  tube.addColorStop(0.4, rgba(tone(r, gv, b, clothDark ? 0.5 : 0.4), 1));
-  tube.addColorStop(0.58, rgba([r, gv, b], 1));
-  tube.addColorStop(1, rgba(tone(r, gv, b, -0.68), 1));
-  g.strokeStyle = tube;
-  g.lineWidth = cord;
-  g.beginPath();
-  g.moveTo(-2, mid);
-  g.lineTo(FLOSS_TILE_W + 2, mid);
-  g.stroke();
-
-  g.save();
-  g.beginPath();
-  g.rect(-8, mid - cord / 2, FLOSS_TILE_W + 16, cord);
-  g.clip();
-
-  const sine = (side: number) => {
+  for (const ply of plies) {
+    g.strokeStyle = rgba(tone(r, gv, b, ply.tone), ply.alpha);
+    g.lineWidth = cord * ply.width;
     g.beginPath();
-    for (let x = -6; x <= FLOSS_TILE_W + 6; x += 2) {
-      const y = mid + Math.sin((x / FLOSS_PITCH) * Math.PI * 2) * amp * side;
-      if (x === -6) g.moveTo(x, y);
+    for (let x = -2; x <= FLOSS_TILE_W + 2; x += 1) {
+      const y =
+        mid +
+        Math.sin((x / FLOSS_TILE_W) * Math.PI * 2 + ply.phase) * cord * ply.amp +
+        cord * ply.lift;
+      if (x === -2) g.moveTo(x, y);
       else g.lineTo(x, y);
     }
     g.stroke();
-  };
-
-  g.lineWidth = cord * 0.62;
-  g.strokeStyle = rgba(tone(r, gv, b, -0.55), 1);
-  sine(-1);
-  g.lineWidth = cord * 0.5;
-  g.strokeStyle = rgba(tone(r, gv, b, clothDark ? 0.22 : 0.1), 1);
-  sine(1);
-  g.lineWidth = cord * 0.28;
-  g.strokeStyle = rgba(tone(r, gv, b, clothDark ? 0.82 : 0.68), 1);
-  sine(1);
-  g.restore();
+  }
 
   flossTiles.set(key, canvas);
   return canvas;
@@ -1571,30 +2282,35 @@ function paintFloss(
   color: string,
   width: number,
   clothDark: boolean,
+  castShadow = true,
+  ends: ThreadEnd = "both",
 ) {
   if (points.length < 2) return;
-  const w = Math.max(1.35, width);
+  const w = Math.max(1.05, width * 0.92);
   const tile = flossTile(color, clothDark);
   const scale = w / FLOSS_CORD;
   const radius = FLOSS_CORD / 2;
+  const sunk = sinkEnds(points, ends, Math.min(2.3, w * 1.2));
 
-  ctx.save();
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  strokeShifted(
-    ctx,
-    points,
-    0.35,
-    w * 0.55,
-    w * 0.95,
-    clothDark ? "rgba(0,0,0,0.38)" : "rgba(55, 32, 16, 0.18)",
-  );
-  ctx.restore();
+  if (castShadow) {
+    ctx.save();
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    strokeShifted(
+      ctx,
+      sunk,
+      0.2,
+      Math.max(0.35, w * 0.32),
+      w * 0.5,
+      clothDark ? "rgba(0,0,0,0.28)" : "rgba(40, 24, 12, 0.14)",
+    );
+    ctx.restore();
+  }
 
   let phase = (threadPhase(points[0].x, points[0].y) / (Math.PI * 2)) * FLOSS_TILE_W;
-  for (let i = 1; i < points.length; i++) {
-    const a = points[i - 1];
-    const b = points[i];
+  for (let i = 1; i < sunk.length; i++) {
+    const a = sunk[i - 1];
+    const b = sunk[i];
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     const len = Math.hypot(dx, dy);
@@ -1604,7 +2320,9 @@ function paintFloss(
     ctx.translate(a.x, a.y);
     ctx.rotate(Math.atan2(dy, dx));
     ctx.scale(scale, scale);
-    clipStrand(ctx, span, radius, i === 1, i === points.length - 1);
+    const capStart = ends === "none" && i === 1;
+    const capEnd = ends === "none" && i === sunk.length - 1;
+    clipStrand(ctx, span, radius, capStart, capEnd);
     const origin = -(((phase % FLOSS_TILE_W) + FLOSS_TILE_W) % FLOSS_TILE_W);
     for (let x = origin - FLOSS_TILE_W; x < span + radius; x += FLOSS_TILE_W) {
       ctx.drawImage(tile, x, -FLOSS_TILE_H / 2, FLOSS_TILE_W, FLOSS_TILE_H);
@@ -1612,6 +2330,63 @@ function paintFloss(
     ctx.restore();
     phase += span;
   }
+
+  if (ends !== "none") buryThreadEnd(ctx, points[0], sunk[0], color, w, clothDark);
+  if (ends === "both") buryThreadEnd(ctx, points[points.length - 1], sunk[sunk.length - 1], color, w, clothDark);
+}
+
+function sinkEnds(points: Point[], ends: ThreadEnd, dist: number) {
+  const out = points.map((point) => ({ x: point.x, y: point.y }));
+  if (ends === "none" || out.length < 2 || dist <= 0) return out;
+  const pull = (index: number, toward: number) => {
+    const from = out[index];
+    const next = out[toward];
+    const dx = next.x - from.x;
+    const dy = next.y - from.y;
+    const len = Math.hypot(dx, dy);
+    if (len < dist * 2.1) return;
+    out[index] = { x: from.x + (dx / len) * dist, y: from.y + (dy / len) * dist };
+  };
+  pull(0, 1);
+  if (ends === "both") pull(out.length - 1, out.length - 2);
+  return out;
+}
+
+function buryThreadEnd(
+  ctx: CanvasRenderingContext2D,
+  outer: Point,
+  inner: Point,
+  color: string,
+  width: number,
+  clothDark: boolean,
+) {
+  const dx = inner.x - outer.x;
+  const dy = inner.y - outer.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 0.4) {
+    paintPuncture(ctx, outer.x, outer.y, width, clothDark);
+    return;
+  }
+  const px = -dy / len;
+  const py = dx / len;
+  const [r, g, b] = hexToRgb(color);
+  ctx.save();
+  ctx.lineCap = "round";
+  const necks = [
+    { side: -0.16, lift: -0.2, alpha: 0.95 },
+    { side: 0.02, lift: 0.08, alpha: 0.9 },
+    { side: 0.16, lift: -0.32, alpha: 0.8 },
+  ];
+  for (const neck of necks) {
+    ctx.strokeStyle = rgba(tone(r, g, b, neck.lift), neck.alpha);
+    ctx.lineWidth = Math.max(0.28, width * 0.16);
+    ctx.beginPath();
+    ctx.moveTo(outer.x, outer.y);
+    ctx.lineTo(inner.x + px * width * neck.side, inner.y + py * width * neck.side);
+    ctx.stroke();
+  }
+  ctx.restore();
+  paintPuncture(ctx, outer.x, outer.y, width, clothDark);
 }
 
 function clipStrand(

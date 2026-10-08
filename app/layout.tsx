@@ -22,9 +22,11 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="en"
-      className={`${geist.variable} ${newsreader.variable} h-full antialiased`}
+      className={`${geist.variable} ${newsreader.variable} fixed inset-0 h-full w-full overflow-hidden overscroll-none antialiased`}
     >
-      <body className="min-h-full font-sans">{children}</body>
+      <body className="fixed inset-0 h-full w-full overflow-hidden overscroll-none font-sans">
+        {children}
+      </body>
     </html>
   );
 }

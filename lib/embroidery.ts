@@ -14,8 +14,8 @@ export const STITCHES = [
   {
     id: "knot",
     name: "Knots",
-    label: "French knot",
-    blurb: "Raised knots packed into the letter. Each center is the accent thread.",
+    label: "Knot stitch",
+    blurb: "Twisted knots chained through the letter, with a short thread between each one.",
   },
   {
     id: "running",
@@ -599,7 +599,7 @@ function collectCross(
 
   const { cell, cols, rows, pixels, ox, oy, spanStart, spanEnd } = chart;
   const ranges = charRanges(options.text.trim(), options.fontFamily, spanStart, spanEnd, 100, 2);
-  const threadW = Math.max(1.1, cell * 0.16);
+  const threadW = Math.max(1.1, cell * 0.16) * 2;
   const reach = cell * 2.5;
 
   type CrossCell = {
@@ -1394,119 +1394,246 @@ function collectKnots(
   const box = bounds(mask.mask, mask.w, mask.h);
   if (!box) return;
 
-  const spacing = clampNum(10, 22, 15 * options.scale);
+  const size = clampNum(4.8, 8, 6 * options.scale);
+  const strand = Math.max(1.7, size * 0.42);
+  const pitchY = size * 2.42;
+  const pitchX = size * 2.16;
   const minX = box.minX / mask.scale;
   const maxX = box.maxX / mask.scale;
   const minY = box.minY / mask.scale;
   const maxY = box.maxY / mask.scale;
-  let row = 0;
-  for (let y = minY; y <= maxY; y += spacing) {
-    const shift = row % 2 === 0 ? 0 : spacing * 0.5;
-    for (let x = minX; x <= maxX; x += spacing) {
-      const px = x + shift + (rng() - 0.5) * spacing * 0.22;
-      const py = y + (rng() - 0.5) * spacing * 0.22;
+
+  type Knot = {
+    x: number;
+    y: number;
+    size: number;
+    turn: number;
+    lean: number;
+    charIndex: number;
+  };
+
+  let col = 0;
+  let carry: Point | null = null;
+  for (let x = minX; x <= maxX; x += pitchX) {
+    const knots: Knot[] = [];
+    const y0 = minY + (col % 2) * pitchY * 0.22;
+    for (let y = y0; y <= maxY; y += pitchY) {
+      const wander = Math.sin(y * 0.17 + col * 1.4) * size * 0.28;
+      const px = x + wander + (rng() - 0.5) * size * 0.22;
+      const py = y + (rng() - 0.5) * size * 0.28;
       if (!inside(mask, px, py)) continue;
-      const radius = spacing * 0.42;
-      const turn = rng() * Math.PI * 2;
-      const charIndex = charIndexAt(px, ranges);
-      marks.push({
-        charIndex,
-        weight: 4.8,
-        draw(ctx, amount) {
-          if (amount >= 1) {
-            drawKnot(ctx, px, py, radius, options.thread, options.accent, clothDark, turn);
-            return;
-          }
-          const emerge = 0.16;
-          const wrapEnd = 0.68;
-          if (amount <= emerge) return;
-          if (amount < wrapEnd) {
-            const u = (amount - emerge) / (wrapEnd - emerge);
-            drawCoil(ctx, px, py, radius * 0.95, u * 1.7, options.thread, turn, clothDark);
-            return;
-          }
-          const u = (amount - wrapEnd) / (1 - wrapEnd);
-          ctx.save();
-          if (u < 0.82) {
-            ctx.globalAlpha = 1 - Math.max(0, (u - 0.35) / 0.47);
-            drawCoil(
-              ctx,
-              px,
-              py,
-              radius * (0.95 - 0.5 * u),
-              1.7,
-              options.thread,
-              turn,
-              clothDark,
-            );
-          }
-          if (u > 0.4) {
-            ctx.globalAlpha = Math.min(1, (u - 0.4) / 0.45);
-            drawKnot(ctx, px, py, radius, options.thread, options.accent, clothDark, turn);
-          }
-          ctx.restore();
-        },
-        needle(amount) {
-          let sink = 0;
-          if (amount < 0.16) sink = 1 - amount / 0.16;
-          else if (amount > 0.72) sink = Math.min(1, (amount - 0.72) / 0.28);
-          return {
-            x: px,
-            y: py,
-            angle: turn,
-            sink,
-            length: 12,
-            upright: true,
-            entry: { x: px, y: py },
-            exit: amount > 0.72 ? { x: px, y: py } : undefined,
-          };
-        },
+      knots.push({
+        x: px,
+        y: py,
+        size: size * (0.82 + rng() * 0.36),
+        turn: (rng() - 0.5) * 1.1,
+        lean: rng() * 2 - 1,
+        charIndex: charIndexAt(px, ranges),
       });
     }
-    row++;
+
+    const ordered = col % 2 === 0 ? knots : knots.slice().reverse();
+    if (carry && ordered.length && distance(carry, ordered[0]) < pitchX * 3.4) {
+      pushUnder(
+        marks,
+        carry.x,
+        carry.y,
+        ordered[0].x,
+        ordered[0].y,
+        ordered[0].charIndex,
+        clothDark,
+      );
+    }
+
+    for (let i = 0; i < ordered.length; i++) {
+      const knot = ordered[i];
+      const next = ordered[i + 1];
+      const linked = next && distance(knot, next) < pitchY * 1.7 ? next : null;
+      pushKnot(marks, knot, linked, strand, options.thread, clothDark);
+    }
+
+    if (ordered.length) carry = ordered[ordered.length - 1];
+    col++;
   }
 }
 
-function drawKnot(
+function pushKnot(
+  marks: SewMark[],
+  knot: { x: number; y: number; size: number; turn: number; lean: number; charIndex: number },
+  next: { x: number; y: number; size: number } | null,
+  strand: number,
+  thread: string,
+  clothDark: boolean,
+) {
+  const link = next ? knotLink(knot, next) : null;
+  const wrapEnd = link ? 0.66 : 0.84;
+  marks.push({
+    charIndex: knot.charIndex,
+    weight: link ? 4.4 : 3.3,
+    draw(ctx, amount) {
+      if (amount <= 0.04) return;
+      const wrap = Math.min(1, amount / wrapEnd);
+      drawKnotBall(ctx, knot.x, knot.y, knot.size, knot.turn, knot.lean, thread, clothDark, wrap);
+      if (!link || amount <= wrapEnd) return;
+      const u = (amount - wrapEnd) / (1 - wrapEnd);
+      const pts = curveLink(link.from, link.to, link.bend, u);
+      paintFloss(ctx, pts, thread, strand, clothDark, false, "none");
+    },
+    needle(amount) {
+      const up = 0.12;
+      const down = 0.12;
+      if (amount <= up) {
+        return {
+          x: knot.x,
+          y: knot.y,
+          angle: knot.turn,
+          sink: 1 - amount / up,
+          length: 12,
+          upright: true,
+          entry: { x: knot.x, y: knot.y },
+        };
+      }
+      if (amount < wrapEnd) {
+        const wrap = (amount - up) / (wrapEnd - up);
+        const tip = chordTip(knot.x, knot.y, knot.size, knot.turn, knot.lean, wrap);
+        return {
+          x: tip.x,
+          y: tip.y,
+          angle: tip.angle,
+          sink: 0,
+          length: 11,
+          entry: { x: knot.x, y: knot.y },
+        };
+      }
+      if (!link) {
+        return {
+          x: knot.x,
+          y: knot.y,
+          angle: knot.turn,
+          sink: Math.min(1, (amount - wrapEnd) / (1 - wrapEnd)),
+          length: 12,
+          upright: true,
+          entry: { x: knot.x, y: knot.y },
+          exit: { x: knot.x, y: knot.y },
+        };
+      }
+      const u = Math.min(1, (amount - wrapEnd) / (1 - wrapEnd - down));
+      const along = curveLink(link.from, link.to, link.bend, Math.max(0.04, u));
+      const tip = along[along.length - 1];
+      const prev = along[Math.max(0, along.length - 2)];
+      const sinking = amount > 1 - down;
+      return {
+        x: tip.x,
+        y: tip.y,
+        angle: Math.atan2(tip.y - prev.y, tip.x - prev.x),
+        sink: sinking ? (amount - (1 - down)) / down : 0,
+        length: 11,
+        entry: { x: knot.x, y: knot.y },
+        exit: sinking ? link.to : undefined,
+      };
+    },
+  });
+}
+
+function knotLink(
+  knot: { x: number; y: number; size: number; lean: number },
+  next: { x: number; y: number; size: number },
+) {
+  return {
+    from: stepToward(knot, next, knot.size * 0.42),
+    to: stepToward(next, knot, next.size * 0.7),
+    bend: knot.lean * knot.size * 0.16,
+  };
+}
+
+function stepToward(from: { x: number; y: number }, to: { x: number; y: number }, dist: number) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const len = Math.hypot(dx, dy) || 1;
+  return { x: from.x + (dx / len) * dist, y: from.y + (dy / len) * dist };
+}
+
+function drawKnotBall(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
-  radius: number,
-  thread: string,
-  accent: string,
-  clothDark: boolean,
+  size: number,
   turn: number,
+  lean: number,
+  thread: string,
+  clothDark: boolean,
+  amount: number,
 ) {
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(turn);
-
-  ctx.fillStyle = clothDark ? "rgba(0,0,0,0.45)" : "rgba(70,40,24,0.22)";
-  ctx.beginPath();
-  ctx.ellipse(0.7, 1.15, radius * 0.95, radius * 0.78, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  const wrap: Point[] = [];
-  const arc0 = 0.15;
-  const arc1 = Math.PI * 2.15;
-  const r = radius * 0.48;
-  for (let i = 0; i <= 20; i++) {
-    const a = arc0 + ((arc1 - arc0) * i) / 20;
-    wrap.push({ x: Math.cos(a) * r, y: Math.sin(a) * r * 0.92 });
+  if (amount <= 0.02) return;
+  const chords = knotChords(x, y, size, turn, lean);
+  const width = Math.max(2.4, size * 0.78);
+  const shown = amount * chords.length;
+  for (let i = 0; i < chords.length; i++) {
+    if (shown <= i) break;
+    const u = Math.min(1, shown - i);
+    const chord = chords[i];
+    paintFloss(
+      ctx,
+      [chord.a, { x: chord.a.x + (chord.b.x - chord.a.x) * u, y: chord.a.y + (chord.b.y - chord.a.y) * u }],
+      thread,
+      width,
+      clothDark,
+      false,
+      "none",
+    );
   }
-  paintFloss(ctx, wrap, thread, Math.max(0.9, radius * 0.42), clothDark, true, "none");
+}
 
-  const nub = Math.max(1.15, radius * 0.32);
-  const [ar, ag, ab] = hexToRgb(accent);
-  const gloss = ctx.createRadialGradient(-nub * 0.3, -nub * 0.35, nub * 0.1, 0.15, 0.15, nub);
-  gloss.addColorStop(0, rgba(tone(ar, ag, ab, 0.55), 1));
-  gloss.addColorStop(0.55, accent);
-  gloss.addColorStop(1, rgba(tone(ar, ag, ab, -0.35), 1));
-  ctx.fillStyle = gloss;
-  ctx.beginPath();
-  ctx.arc(0.15, 0.15, nub, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
+function knotChords(x: number, y: number, size: number, turn: number, lean: number) {
+  const chords: Array<{ a: Point; b: Point }> = [];
+  for (let i = 0; i < 6; i++) {
+    const angle = turn + (i * Math.PI) / 6 + lean * 0.05;
+    const reach = size * (i < 4 ? 0.46 : 0.28) * (1 + 0.06 * Math.sin(i + lean * 2));
+    const c = Math.cos(angle);
+    const s = Math.sin(angle) * (0.9 + lean * 0.05);
+    const ox = -Math.sin(angle) * size * 0.04 * ((i % 3) - 1);
+    const oy = Math.cos(angle) * size * 0.04 * ((i % 3) - 1);
+    chords.push({
+      a: { x: x - c * reach + ox, y: y - s * reach + oy },
+      b: { x: x + c * reach + ox, y: y + s * reach + oy },
+    });
+  }
+  return chords;
+}
+
+function chordTip(x: number, y: number, size: number, turn: number, lean: number, amount: number) {
+  const chords = knotChords(x, y, size, turn, lean);
+  const f = Math.max(0, Math.min(0.999, amount)) * chords.length;
+  const i = Math.min(chords.length - 1, Math.floor(f));
+  const u = f - i;
+  const chord = chords[i];
+  return {
+    x: chord.a.x + (chord.b.x - chord.a.x) * u,
+    y: chord.a.y + (chord.b.y - chord.a.y) * u,
+    angle: Math.atan2(chord.b.y - chord.a.y, chord.b.x - chord.a.x),
+  };
+}
+
+function curveLink(from: Point, to: Point, bend: number, amount: number) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const c = {
+    x: (from.x + to.x) / 2 + (-dy / len) * bend,
+    y: (from.y + to.y) / 2 + (dx / len) * bend,
+  };
+  const steps = Math.max(2, Math.round(7 * amount));
+  const pts: Point[] = [];
+  const uMax = Math.max(0.04, Math.min(1, amount));
+  for (let i = 0; i <= steps; i++) {
+    const t = (i / steps) * uMax;
+    const u = 1 - t;
+    pts.push({
+      x: u * u * from.x + 2 * u * t * c.x + t * t * to.x,
+      y: u * u * from.y + 2 * u * t * c.y + t * t * to.y,
+    });
+  }
+  return pts;
 }
 
 function collectRunning(
@@ -1518,7 +1645,7 @@ function collectRunning(
 ) {
   const dash = clampNum(7, 18, 12 * options.scale);
   const gap = dash * 0.62;
-  const width = clampNum(1.3, 2.8, 1.7 * options.scale);
+  const width = clampNum(1.3, 2.8, 1.7 * options.scale) * 2;
   const echo = 4.2 * options.scale;
 
   for (const contour of contours) {
@@ -1561,7 +1688,7 @@ function collectChain(
   ranges: Array<[number, number]>,
 ) {
   const spacing = clampNum(7, 16, 11 * options.scale);
-  const width = clampNum(1.2, 2.4, 1.55 * options.scale);
+  const width = clampNum(1.2, 2.4, 1.55 * options.scale) * 2;
 
   for (const contour of contours) {
     const pts = resampleClosed(contour, spacing);
@@ -1666,7 +1793,7 @@ function collectWhipped(
   ranges: Array<[number, number]>,
 ) {
   const stitch = clampNum(6, 14, 8 * options.scale);
-  const baseW = clampNum(1.8, 3.6, 2.7 * options.scale);
+  const baseW = clampNum(1.8, 3.6, 2.7 * options.scale) * 2;
   const whipSpacing = clampNum(5, 10, 7.2 * options.scale);
   const whipLen = 7.2 * options.scale;
 
@@ -1890,27 +2017,6 @@ function strokeThread(
   ends: ThreadEnd = "both",
 ) {
   paintFloss(ctx, points, color, width, clothDark, true, ends);
-}
-
-function drawCoil(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  radius: number,
-  turns: number,
-  color: string,
-  rot: number,
-  clothDark: boolean,
-) {
-  if (turns <= 0.02 || radius <= 0.4) return;
-  const steps = Math.max(6, Math.ceil(turns * 20));
-  const points: Point[] = [];
-  for (let i = 0; i <= steps; i++) {
-    const a = rot + (i / steps) * turns * Math.PI * 2;
-    const r = radius * (1 - 0.12 * (i / steps));
-    points.push({ x: x + Math.cos(a) * r, y: y + Math.sin(a) * r });
-  }
-  strokeThread(ctx, points, color, Math.max(0.75, radius * 0.22), clothDark, "none");
 }
 
 function drawBuriedThread(

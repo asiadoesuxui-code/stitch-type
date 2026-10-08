@@ -2,7 +2,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-const useIsoLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+const useIsoLayoutEffect = useLayoutEffect;
 import {
   STITCHES,
   buildEmbroideryScene,
@@ -41,6 +41,40 @@ export function Studio() {
   const [caret, setCaret] = useState(0);
 
   const darkCloth = relativeLuminance(fabric) < 0.42;
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const body = document.body;
+    root.style.overflow = "clip";
+    body.style.overflow = "clip";
+    root.style.position = "fixed";
+    body.style.position = "fixed";
+    root.style.inset = "0";
+    body.style.inset = "0";
+    root.style.width = "100%";
+    body.style.width = "100%";
+    root.style.height = "100%";
+    body.style.height = "100%";
+    root.style.overscrollBehavior = "none";
+    body.style.overscrollBehavior = "none";
+    const stopWheel = (event: WheelEvent) => {
+      if (event.ctrlKey) return;
+      const bar = controlsRef.current?.firstElementChild;
+      if (
+        bar instanceof HTMLElement &&
+        event.target instanceof Node &&
+        bar.contains(event.target) &&
+        bar.scrollWidth > bar.clientWidth + 1 &&
+        Math.abs(event.deltaX) > Math.abs(event.deltaY)
+      ) {
+        return;
+      }
+      event.preventDefault();
+    };
+    window.addEventListener("wheel", stopWheel, { passive: false });
+    window.scrollTo(0, 0);
+    return () => window.removeEventListener("wheel", stopWheel);
+  }, []);
 
   useEffect(() => {
     let cancel = false;
@@ -219,14 +253,14 @@ export function Studio() {
   return (
     <div
       ref={stageRef}
-      className="relative h-dvh overflow-hidden"
+      className="fixed inset-0 overflow-hidden"
       style={{ background: fabric }}
     >
       <h1 className="sr-only">Stitch</h1>
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" aria-hidden />
 
       <div
-        className="absolute inset-x-0 top-0 z-10 flex items-center"
+        className="absolute inset-x-0 top-0 z-10 flex items-center overflow-hidden"
         style={{ bottom: insetBottom }}
         onMouseDown={(event) => {
           if (event.target === event.currentTarget) {
@@ -247,11 +281,24 @@ export function Studio() {
           onSelect={(event) => setCaret(event.currentTarget.selectionStart ?? 0)}
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
+          onScroll={(event) => {
+            event.currentTarget.scrollLeft = 0;
+            event.currentTarget.scrollTop = 0;
+          }}
+          size={1}
           spellCheck={false}
           autoCapitalize="off"
           autoCorrect="off"
-          className="word-field w-full bg-transparent text-center outline-none"
+          className="word-field absolute inset-0 block bg-transparent text-center outline-none"
           style={{
+            width: "100%",
+            maxWidth: "100%",
+            minWidth: 0,
+            height: "100%",
+            maxHeight: "100%",
+            minHeight: 0,
+            overflow: "clip",
+            boxSizing: "border-box",
             fontFamily: "var(--font-display), Georgia, serif",
             fontWeight: 600,
             fontSize: layout?.fontSize ?? 160,
@@ -279,16 +326,16 @@ export function Studio() {
 
       <div
         ref={controlsRef}
-        className="absolute inset-x-0 bottom-0 z-20 px-3 pb-3 sm:px-5 sm:pb-5"
+        className="absolute inset-x-0 bottom-0 z-20 overflow-hidden px-3 pb-3 sm:px-5 sm:pb-5"
       >
         <div
-          className={`mx-auto w-fit max-w-full rounded-[14px] border p-3 pr-5 backdrop-blur-md sm:p-4 sm:pr-6 ${
+          className={`mx-auto w-fit max-w-full overflow-x-auto overflow-y-hidden overscroll-x-contain rounded-[14px] border p-3 pr-5 backdrop-blur-md sm:p-4 sm:pr-6 ${
             darkCloth
               ? "border-white/10 bg-[#1c1916]/80 text-[#f6f1e8]"
               : "border-[#3a2a1c]/10 bg-[#fffaf3]/82 text-[#2a2118]"
           }`}
         >
-          <div className="flex items-center gap-3 overflow-x-auto md:gap-12">
+          <div className="flex w-max items-center gap-3 md:gap-12">
             <div
               role="radiogroup"
               aria-label="Stitch type"
@@ -354,7 +401,7 @@ function Swatch({
           value={value}
           aria-label={label}
           onChange={(event) => onChange(event.target.value)}
-          className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+          className="absolute inset-0 h-full w-full cursor-pointer appearance-none overflow-hidden border-0 p-0 opacity-0"
         />
       </span>
       <span className="text-[11px] font-medium tracking-[0.16em] uppercase opacity-60">
@@ -399,11 +446,19 @@ function StitchIcon({ id }: { id: StitchId }) {
   if (id === "knot") {
     return (
       <svg {...common}>
-        {[6, 14, 22, 30].map((x) => (
-          <g key={x} stroke="currentColor">
-            <circle cx={x} cy="9" r="3.1" strokeWidth="1.4" />
-            <circle cx={x} cy="9" r="0.8" fill="currentColor" stroke="none" />
-          </g>
+        <path
+          d="M6.2 9h2.1M15.6 9h2.1M25 9h2.1"
+          stroke="currentColor"
+          strokeWidth="1.25"
+          strokeLinecap="round"
+        />
+        {[9.2, 18.6, 28].map((x) => (
+          <path
+            key={x}
+            d={`M${x - 2.15} 9c.35-2.15 3.95-2.15 4.3 0-.35 2.15-3.95 2.15-4.3 0z`}
+            stroke="currentColor"
+            strokeWidth="1.25"
+          />
         ))}
       </svg>
     );

@@ -890,22 +890,25 @@ function drawKnot(
   ctx.ellipse(0.7, 1.15, radius * 0.95, radius * 0.78, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  ctx.strokeStyle = thread;
-  ctx.lineWidth = radius * 0.7;
-  ctx.lineCap = "round";
-  ctx.beginPath();
-  ctx.arc(0, 0, radius * 0.46, 0.2, Math.PI * 2.2);
-  ctx.stroke();
+  const wrap: Point[] = [];
+  const arc0 = 0.15;
+  const arc1 = Math.PI * 2.15;
+  const r = radius * 0.48;
+  for (let i = 0; i <= 20; i++) {
+    const a = arc0 + ((arc1 - arc0) * i) / 20;
+    wrap.push({ x: Math.cos(a) * r, y: Math.sin(a) * r * 0.92 });
+  }
+  paintFloss(ctx, wrap, thread, Math.max(1.35, radius * 0.62), clothDark);
 
-  ctx.strokeStyle = lighten(thread, 0.38);
-  ctx.lineWidth = radius * 0.28;
+  const nub = Math.max(1.15, radius * 0.32);
+  const [ar, ag, ab] = hexToRgb(accent);
+  const gloss = ctx.createRadialGradient(-nub * 0.3, -nub * 0.35, nub * 0.1, 0.15, 0.15, nub);
+  gloss.addColorStop(0, rgba(tone(ar, ag, ab, 0.55), 1));
+  gloss.addColorStop(0.55, accent);
+  gloss.addColorStop(1, rgba(tone(ar, ag, ab, -0.35), 1));
+  ctx.fillStyle = gloss;
   ctx.beginPath();
-  ctx.arc(-radius * 0.08, -radius * 0.1, radius * 0.34, Math.PI * 1.05, Math.PI * 1.85);
-  ctx.stroke();
-
-  ctx.fillStyle = accent;
-  ctx.beginPath();
-  ctx.arc(0.2, 0.2, Math.max(1.1, radius * 0.3), 0, Math.PI * 2);
+  ctx.arc(0.15, 0.15, nub, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
@@ -1008,18 +1011,10 @@ function collectChain(
         weight: Math.max(2.4, Math.min(3.6, len / 5)),
         draw(ctx, amount) {
           const paint = () => {
-            ctx.beginPath();
-            ctx.moveTo(p.x, p.y);
-            ctx.bezierCurveTo(c1.x, c1.y, c2.x, c2.y, q.x, q.y);
-            ctx.bezierCurveTo(c3.x, c3.y, c4.x, c4.y, p.x, p.y);
-            ctx.strokeStyle = clothDark ? "rgba(0,0,0,0.45)" : "rgba(70,40,24,0.2)";
-            ctx.lineWidth = width + 1.1;
-            ctx.lineCap = "round";
-            ctx.lineJoin = "round";
-            ctx.stroke();
-            ctx.strokeStyle = options.thread;
-            ctx.lineWidth = width;
-            ctx.stroke();
+            const steps = 22;
+            const pts: Point[] = [];
+            for (let s = 0; s <= steps; s++) pts.push(loopAt(s / steps));
+            paintFloss(ctx, pts, options.thread, width, clothDark);
           };
           if (amount >= 1) {
             paint();
@@ -1279,29 +1274,7 @@ function strokeThread(
   width: number,
   clothDark: boolean,
 ) {
-  if (points.length < 2) return;
-  const trace = () => {
-    ctx.beginPath();
-    ctx.moveTo(points[0].x, points[0].y);
-    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
-  };
-  const alpha = ctx.globalAlpha;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  trace();
-  ctx.strokeStyle = clothDark ? "rgba(0,0,0,0.45)" : "rgba(72, 42, 28, 0.24)";
-  ctx.lineWidth = width + 0.9;
-  ctx.stroke();
-  trace();
-  ctx.strokeStyle = color;
-  ctx.lineWidth = width;
-  ctx.stroke();
-  trace();
-  ctx.strokeStyle = lighten(color, clothDark ? 0.5 : 0.34);
-  ctx.globalAlpha = alpha * (clothDark ? 0.72 : 0.48);
-  ctx.lineWidth = Math.max(0.5, width * 0.28);
-  ctx.stroke();
-  ctx.globalAlpha = alpha;
+  paintFloss(ctx, points, color, width, clothDark);
 }
 
 function drawCoil(
@@ -1512,36 +1485,202 @@ function drawThread(
   width: number,
   clothDark: boolean,
 ) {
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const len = Math.hypot(dx, dy) || 1;
-  const nx = -dy / len;
-  const ny = dx / len;
+  paintFloss(ctx, [{ x: x1, y: y1 }, { x: x2, y: y2 }], color, width, clothDark);
+}
 
+const FLOSS_TILE_W = 90;
+const FLOSS_TILE_H = 48;
+const FLOSS_PITCH = 90;
+const FLOSS_CORD = 30;
+
+const flossTiles = new Map<string, HTMLCanvasElement>();
+
+function flossTile(color: string, clothDark: boolean) {
+  const key = `${color}:${clothDark ? "d" : "l"}`;
+  const existing = flossTiles.get(key);
+  if (existing) return existing;
+
+  const res = 3;
+  const canvas = document.createElement("canvas");
+  canvas.width = FLOSS_TILE_W * res;
+  canvas.height = FLOSS_TILE_H * res;
+  const g = canvas.getContext("2d");
+  if (!g) return canvas;
+  g.setTransform(res, 0, 0, res, 0, 0);
+
+  const [r, gv, b] = hexToRgb(color);
+  const mid = FLOSS_TILE_H / 2;
+  const cord = FLOSS_CORD;
+  const amp = cord * 0.22;
+
+  g.lineCap = "round";
+  g.strokeStyle = rgba(tone(r, gv, b, clothDark ? 0.05 : 0.12), 0.28);
+  g.lineWidth = cord + 5;
+  g.beginPath();
+  g.moveTo(-2, mid);
+  g.lineTo(FLOSS_TILE_W + 2, mid);
+  g.stroke();
+
+  const tube = g.createLinearGradient(0, mid - cord / 2, 0, mid + cord / 2);
+  tube.addColorStop(0, rgba(tone(r, gv, b, -0.42), 1));
+  tube.addColorStop(0.28, rgba(tone(r, gv, b, -0.08), 1));
+  tube.addColorStop(0.46, rgba(tone(r, gv, b, clothDark ? 0.34 : 0.26), 1));
+  tube.addColorStop(0.58, rgba([r, gv, b], 1));
+  tube.addColorStop(1, rgba(tone(r, gv, b, -0.5), 1));
+  g.strokeStyle = tube;
+  g.lineWidth = cord;
+  g.beginPath();
+  g.moveTo(-2, mid);
+  g.lineTo(FLOSS_TILE_W + 2, mid);
+  g.stroke();
+
+  g.save();
+  g.beginPath();
+  g.rect(0, mid - cord / 2, FLOSS_TILE_W, cord);
+  g.clip();
+
+  const sine = (side: number, shift: number) => {
+    g.beginPath();
+    for (let x = -4; x <= FLOSS_TILE_W + 4; x += 2) {
+      const y = mid + Math.sin(((x + shift) / FLOSS_PITCH) * Math.PI * 2) * amp * side;
+      if (x === -4) g.moveTo(x, y);
+      else g.lineTo(x, y);
+    }
+  };
+
+  g.lineWidth = cord * 0.28;
+  g.strokeStyle = rgba(tone(r, gv, b, -0.32), 0.55);
+  sine(-1, 0);
+  g.stroke();
+  g.strokeStyle = rgba(tone(r, gv, b, clothDark ? 0.16 : 0.08), 0.7);
+  sine(1, 0);
+  g.stroke();
+
+  g.lineWidth = cord * 0.14;
+  g.strokeStyle = rgba(tone(r, gv, b, clothDark ? 0.48 : 0.36), 0.55);
+  sine(1, FLOSS_PITCH * 0.06);
+  g.stroke();
+
+  g.globalAlpha = 0.35;
+  g.lineWidth = 1.1;
+  for (let band = -2; band <= 2; band++) {
+    g.strokeStyle = rgba(tone(r, gv, b, band % 2 === 0 ? 0.4 : -0.25), 1);
+    g.beginPath();
+    const y = mid + band * cord * 0.16;
+    for (let x = 0; x <= FLOSS_TILE_W; x += 3) {
+      const wobble = Math.sin((x / FLOSS_PITCH) * Math.PI * 4 + band) * 0.6;
+      if (x === 0) g.moveTo(x, y + wobble);
+      else g.lineTo(x, y + wobble);
+    }
+    g.stroke();
+  }
+  g.restore();
+
+  flossTiles.set(key, canvas);
+  return canvas;
+}
+
+function paintFloss(
+  ctx: CanvasRenderingContext2D,
+  points: Point[],
+  color: string,
+  width: number,
+  clothDark: boolean,
+) {
+  if (points.length < 2) return;
+  const w = Math.max(1.35, width);
+  const tile = flossTile(color, clothDark);
+  const scale = w / FLOSS_CORD;
+  const radius = FLOSS_CORD / 2;
+
+  ctx.save();
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  ctx.strokeStyle = clothDark ? "rgba(0,0,0,0.5)" : "rgba(72, 42, 28, 0.24)";
-  ctx.lineWidth = width + 0.7;
-  ctx.beginPath();
-  ctx.moveTo(x1 + 0.35, y1 + 1);
-  ctx.lineTo(x2 + 0.35, y2 + 1);
-  ctx.stroke();
+  strokeShifted(
+    ctx,
+    points,
+    0.35,
+    w * 0.55,
+    w * 0.95,
+    clothDark ? "rgba(0,0,0,0.38)" : "rgba(55, 32, 16, 0.18)",
+  );
+  ctx.restore();
 
-  ctx.strokeStyle = color;
+  let phase = (threadPhase(points[0].x, points[0].y) / (Math.PI * 2)) * FLOSS_TILE_W;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 0.2) continue;
+    const span = len / scale;
+    ctx.save();
+    ctx.translate(a.x, a.y);
+    ctx.rotate(Math.atan2(dy, dx));
+    ctx.scale(scale, scale);
+    clipStrand(ctx, span, radius, i === 1, i === points.length - 1);
+    const origin = -(((phase % FLOSS_TILE_W) + FLOSS_TILE_W) % FLOSS_TILE_W);
+    for (let x = origin - FLOSS_TILE_W; x < span + radius; x += FLOSS_TILE_W) {
+      ctx.drawImage(tile, x, -FLOSS_TILE_H / 2, FLOSS_TILE_W, FLOSS_TILE_H);
+    }
+    ctx.restore();
+    phase += span;
+  }
+}
+
+function clipStrand(
+  ctx: CanvasRenderingContext2D,
+  length: number,
+  radius: number,
+  capStart: boolean,
+  capEnd: boolean,
+) {
+  ctx.beginPath();
+  if (capStart) ctx.arc(0, 0, radius, Math.PI / 2, -Math.PI / 2, false);
+  else ctx.moveTo(0, -radius);
+  ctx.lineTo(length, -radius);
+  if (capEnd) ctx.arc(length, 0, radius, -Math.PI / 2, Math.PI / 2, false);
+  else ctx.lineTo(length, radius);
+  ctx.lineTo(0, radius);
+  ctx.closePath();
+  ctx.clip();
+}
+
+function strokePath(
+  ctx: CanvasRenderingContext2D,
+  points: Point[],
+  width: number,
+  style: string,
+) {
+  if (points.length < 2) return;
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+  ctx.strokeStyle = style;
   ctx.lineWidth = width;
-  ctx.beginPath();
-  ctx.moveTo(x1, y1);
-  ctx.lineTo(x2, y2);
   ctx.stroke();
+}
 
-  ctx.strokeStyle = lighten(color, clothDark ? 0.5 : 0.34);
-  ctx.globalAlpha = clothDark ? 0.72 : 0.48;
-  ctx.lineWidth = Math.max(0.5, width * 0.28);
-  ctx.beginPath();
-  ctx.moveTo(x1 - nx * width * 0.16, y1 - ny * width * 0.16);
-  ctx.lineTo(x2 - nx * width * 0.16, y2 - ny * width * 0.16);
-  ctx.stroke();
-  ctx.globalAlpha = 1;
+function strokeShifted(
+  ctx: CanvasRenderingContext2D,
+  points: Point[],
+  dx: number,
+  dy: number,
+  width: number,
+  style: string,
+) {
+  strokePath(
+    ctx,
+    points.map((p) => ({ x: p.x + dx, y: p.y + dy })),
+    width,
+    style,
+  );
+}
+
+function threadPhase(x: number, y: number) {
+  const n = Math.imul(Math.round(x * 7) ^ Math.imul(Math.round(y * 7), 374761393), 668265263);
+  return ((n >>> 0) % 1000) / 1000 * Math.PI * 2;
 }
 
 function traceContours(
@@ -1883,9 +2022,20 @@ function luminance(hex: string) {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
-function lighten(hex: string, amount: number) {
-  const [r, g, b] = hexToRgb(hex);
-  return `rgb(${clamp(r + (255 - r) * amount)}, ${clamp(g + (255 - g) * amount)}, ${clamp(b + (255 - b) * amount)})`;
+function tone(r: number, g: number, b: number, lift: number): [number, number, number] {
+  if (lift >= 0) {
+    return [
+      clamp(r + (255 - r) * lift),
+      clamp(g + (255 - g) * lift),
+      clamp(b + (255 - b) * lift),
+    ];
+  }
+  const scale = 1 + lift;
+  return [clamp(r * scale), clamp(g * scale), clamp(b * scale)];
+}
+
+function rgba(channels: [number, number, number], alpha: number) {
+  return `rgba(${channels[0]}, ${channels[1]}, ${channels[2]}, ${alpha})`;
 }
 
 function clamp(value: number) {

@@ -162,6 +162,7 @@ export type EmbroideryScene = {
   fabric: string;
   marks: SewMark[];
   play?: PlayCache;
+  sewPace?: { per: number; max: number };
 };
 
 type NeedlePose = {
@@ -181,6 +182,9 @@ type SewMark = {
   weight: number;
   draw: (ctx: CanvasRenderingContext2D, amount: number) => void;
   needle?: (amount: number) => NeedlePose;
+  /** Threads that share a band sew at the same time. The first track sets the pace. */
+  band?: number;
+  track?: number;
 };
 
 export function buildEmbroideryScene(
@@ -226,7 +230,10 @@ export function buildEmbroideryScene(
   }
 
   const contours = tidyContours(traceContours(mask.mask, mask.w, mask.h, mask.scale));
-  if (options.stitch === "running") collectRunning(marks, contours, options, clothDark, ranges);
+  if (options.stitch === "running") {
+    collectRunning(marks, contours, options, clothDark, ranges);
+    return { fabric, marks, sewPace: { per: 120, max: 8000 } };
+  }
   if (options.stitch === "chain") collectChain(marks, contours, options, clothDark, rng, ranges);
   if (options.stitch === "whipped") collectWhipped(marks, contours, options, clothDark, ranges);
   return { fabric, marks };
@@ -244,26 +251,27 @@ export function drawEmbroideryScene(
   drawFabric(ctx, width, height, scene.fabric);
 
   const progress = Math.max(0, Math.min(1, sewProgress));
-  let activeWeight = 0;
   const active: SewMark[] = [];
   for (const mark of scene.marks) {
-    if (mark.charIndex >= sewFrom) {
-      activeWeight += mark.weight;
-      active.push(mark);
-    }
+    if (mark.charIndex >= sewFrom) active.push(mark);
   }
+  const steps = sewSteps(active);
+  let activeWeight = 0;
+  for (const step of steps) activeWeight += step.weight;
   const target = progress >= 1 ? activeWeight : progress * activeWeight;
-  let consumed = 0;
-  let complete = 0;
-  let partial: { mark: SewMark; amount: number } | null = null;
+  const done: SewMark[] = [];
+  const partials: Array<{ mark: SewMark; amount: number }> = [];
   let needle: NeedlePose | null = null;
-  for (const mark of active) {
-    const next = consumed + mark.weight;
-    if (target >= next - 0.0001) complete++;
-    else if (target > consumed + 0.0001) {
-      const amount = (target - consumed) / mark.weight;
-      partial = { mark, amount };
-      if (mark.needle) needle = mark.needle(amount);
+  let consumed = 0;
+  for (const step of steps) {
+    const next = consumed + step.weight;
+    if (target >= next - 0.0001) {
+      for (const row of step.tracks) done.push(...row);
+    } else if (target > consumed + 0.0001) {
+      const advanced = advanceStep(step, target - consumed);
+      done.push(...advanced.done);
+      partials.push(...advanced.partials);
+      needle = advanced.needle;
       break;
     } else break;
     consumed = next;
@@ -272,21 +280,78 @@ export function drawEmbroideryScene(
   const dpr = ctx.getTransform().a || 1;
   const play = playCache(scene, width, height, sewFrom, dpr);
   const layer = play.active.getContext("2d");
+  const parallel = active.some((mark) => mark.band !== undefined);
   if (layer) {
-    if (complete < play.drawn) {
+    if (parallel || done.length < play.drawn) {
       layer.setTransform(1, 0, 0, 1, 0, 0);
       layer.clearRect(0, 0, play.width, play.height);
       layer.setTransform(dpr, 0, 0, dpr, 0, 0);
-      play.drawn = 0;
+      for (const mark of done) mark.draw(layer, 1);
+      play.drawn = done.length;
+    } else {
+      for (let i = play.drawn; i < done.length; i++) done[i].draw(layer, 1);
+      play.drawn = done.length;
     }
-    for (let i = play.drawn; i < complete; i++) active[i].draw(layer, 1);
-    play.drawn = complete;
   }
 
   ctx.drawImage(play.settled, 0, 0, width, height);
   ctx.drawImage(play.active, 0, 0, width, height);
-  if (partial) partial.mark.draw(ctx, partial.amount);
+  for (const partial of partials) partial.mark.draw(ctx, partial.amount);
   if (needle && progress < 1) drawNeedle(ctx, needle, luminance(scene.fabric) < 0.42);
+}
+
+type SewStep = { weight: number; tracks: SewMark[][] };
+
+function sewSteps(marks: SewMark[]) {
+  const steps: SewStep[] = [];
+  let index = 0;
+  while (index < marks.length) {
+    const band = marks[index].band;
+    if (band === undefined) {
+      steps.push({ weight: marks[index].weight, tracks: [[marks[index]]] });
+      index++;
+      continue;
+    }
+    const tracks = new Map<number, SewMark[]>();
+    while (index < marks.length && marks[index].band === band) {
+      const track = marks[index].track ?? 0;
+      const row = tracks.get(track);
+      if (row) row.push(marks[index]);
+      else tracks.set(track, [marks[index]]);
+      index++;
+    }
+    const ordered = [...tracks.entries()].sort((a, b) => a[0] - b[0]);
+    const rows = ordered.map((entry) => entry[1]);
+    const clock = rows[0].reduce((sum, mark) => sum + mark.weight, 0);
+    steps.push({ weight: Math.max(0.0001, clock), tracks: rows });
+  }
+  return steps;
+}
+
+function advanceStep(step: SewStep, local: number) {
+  const done: SewMark[] = [];
+  const partials: Array<{ mark: SewMark; amount: number }> = [];
+  let needle: NeedlePose | null = null;
+  const span = step.weight || 1;
+  const fraction = Math.max(0, Math.min(1, local / span));
+  step.tracks.forEach((row, track) => {
+    let rowWeight = 0;
+    for (const mark of row) rowWeight += mark.weight;
+    const target = rowWeight * fraction;
+    let consumed = 0;
+    for (const mark of row) {
+      const next = consumed + mark.weight;
+      if (target >= next - 0.0001) done.push(mark);
+      else if (target > consumed + 0.0001) {
+        const amount = (target - consumed) / mark.weight;
+        partials.push({ mark, amount });
+        if (track === 0 && mark.needle) needle = mark.needle(amount);
+        break;
+      } else break;
+      consumed = next;
+    }
+  });
+  return { done, partials, needle };
 }
 
 function playCache(
@@ -329,19 +394,21 @@ function playCache(
 }
 
 export function sceneSewWeight(scene: EmbroideryScene, from: number) {
+  const active = scene.marks.filter((mark) => mark.charIndex >= from);
   let total = 0;
-  for (const mark of scene.marks) {
-    if (mark.charIndex >= from) total += mark.weight;
-  }
+  for (const step of sewSteps(active)) total += step.weight;
   return total;
 }
 
-export function sewDurationFor(weight: number) {
+export function sewDurationFor(weight: number, pace?: { per: number; max: number }) {
   if (weight <= 0) return 0;
   // Weight counts every thread. A filled letter is hundreds of weight, which
   // used to run for up to 16s. Same stitch order, short enough to keep up
   // with typing: a letter finishes in well under a second.
-  return Math.max(180, Math.min(640, weight * 36));
+  // Running stitch passes a slower pace so each pierce through the cloth can be seen.
+  const per = pace?.per ?? 36;
+  const max = pace?.max ?? 640;
+  return Math.max(pace ? 320 : 180, Math.min(max, weight * per));
 }
 
 export function paintEmbroidery(
@@ -1648,35 +1715,360 @@ function collectRunning(
   const width = clampNum(1.3, 2.8, 1.7 * options.scale) * 2;
   const echo = 4.2 * options.scale;
 
+  let band = 1;
   for (const contour of contours) {
-    forEachDash(
-      contour,
+    sewRunningRow(marks, contour, dash, gap, options.thread, width, clothDark, ranges, true, 1, band, 0);
+    sewRunningRow(
+      marks,
+      offsetClosed(contour, echo),
       dash,
       gap,
-      (a, b) => {
-        pushThread(marks, ranges, a.x, a.y, b.x, b.y, options.thread, width, clothDark);
-      },
-      (a, b) => {
-        pushUnder(marks, a.x, a.y, b.x, b.y, charIndexAt((a.x + b.x) / 2, ranges), clothDark);
-      },
+      options.accent,
+      width * 0.9,
+      clothDark,
+      ranges,
+      false,
+      1,
+      band,
+      1,
     );
-    const offset = offsetClosed(contour, echo);
-    forEachDash(
-      offset,
-      dash,
-      gap,
-      (a, b, index) => {
-        if (index % 2 === 0) {
-          pushUnder(marks, a.x, a.y, b.x, b.y, charIndexAt((a.x + b.x) / 2, ranges), clothDark);
-          return;
-        }
-        pushThread(marks, ranges, a.x, a.y, b.x, b.y, options.accent, width * 0.9, clothDark);
-      },
-      (a, b) => {
-        pushUnder(marks, a.x, a.y, b.x, b.y, charIndexAt((a.x + b.x) / 2, ranges), clothDark);
-      },
+    band++;
+  }
+}
+
+function sewRunningRow(
+  marks: SewMark[],
+  pts: Point[],
+  dash: number,
+  gap: number,
+  color: string,
+  width: number,
+  clothDark: boolean,
+  ranges: Array<[number, number]>,
+  everyFront: boolean,
+  pace: number,
+  band: number,
+  track: number,
+) {
+  const from = marks.length;
+  const segments: Array<{ a: Point; b: Point; front: boolean }> = [];
+  forEachDash(
+    pts,
+    dash,
+    gap,
+    (a, b) => segments.push({ a, b, front: true }),
+    (a, b) => segments.push({ a, b, front: false }),
+  );
+
+  let index = 0;
+  let frontIndex = 0;
+  while (index < segments.length) {
+    const seg = segments[index++];
+    if (!seg.front) {
+      pushReverseTravel(
+        marks,
+        seg.a,
+        seg.b,
+        charIndexAt((seg.a.x + seg.b.x) / 2, ranges),
+        color,
+        clothDark,
+        frontIndex,
+        pace * 0.35,
+      );
+      continue;
+    }
+    const under = index < segments.length && !segments[index].front ? segments[index++] : null;
+    const visible = everyFront || frontIndex % 2 === 1;
+    const side = frontIndex;
+    frontIndex++;
+    if (!visible) {
+      pushReverseTravel(
+        marks,
+        seg.a,
+        under ? under.b : seg.b,
+        charIndexAt((seg.a.x + seg.b.x) / 2, ranges),
+        color,
+        clothDark,
+        side,
+        pace * 0.35,
+      );
+      continue;
+    }
+    pushRunningStitch(
+      marks,
+      ranges,
+      seg.a,
+      seg.b,
+      under ? under.b : null,
+      color,
+      width,
+      clothDark,
+      side,
+      pace,
     );
   }
+  for (let i = from; i < marks.length; i++) {
+    marks[i].band = band;
+    marks[i].track = track;
+  }
+}
+
+function pushRunningStitch(
+  marks: SewMark[],
+  ranges: Array<[number, number]>,
+  a: Point,
+  b: Point,
+  underEnd: Point | null,
+  color: string,
+  width: number,
+  clothDark: boolean,
+  side: number,
+  pace: number,
+) {
+  const pieces = cutSegment(a.x, a.y, b.x, b.y, ranges);
+  pieces.forEach((piece, index) => {
+    const lead = index === 0;
+    const tail = index === pieces.length - 1;
+    const back =
+      tail && underEnd && distance({ x: piece.x2, y: piece.y2 }, underEnd) > 1.4 ? underEnd : null;
+    const dx = piece.x2 - piece.x1;
+    const dy = piece.y2 - piece.y1;
+    const len = Math.hypot(dx, dy) || 1;
+    const backLen = back ? distance({ x: piece.x2, y: piece.y2 }, back) : 0;
+    const sag = runningSag(backLen, side);
+    const needleLen = Math.min(13, Math.max(7, len * 0.42));
+    const from = { x: piece.x1, y: piece.y1 };
+    const to = { x: piece.x2, y: piece.y2 };
+    marks.push({
+      charIndex: piece.charIndex,
+      weight:
+        pace *
+        ((lead ? 1.15 : 0.4) + Math.max(0.85, Math.min(1.6, len / 11)) + (back ? 1.05 : tail ? 0.7 : 0)),
+      draw(ctx, amount) {
+        if (amount <= 0) return;
+        if (amount >= 1) {
+          drawThread(ctx, from.x, from.y, to.x, to.y, color, width, clothDark, true, "both");
+          return;
+        }
+        const phase = runningPhase(amount, lead, tail, back !== null);
+        if (phase.kind === "up") {
+          const stub = (1 - phase.sink) * Math.min(len * 0.2, 3.6);
+          if (stub > 0.7) {
+            drawThread(
+              ctx,
+              from.x,
+              from.y,
+              from.x + (dx / len) * stub,
+              from.y + (dy / len) * stub,
+              color,
+              width,
+              clothDark,
+              true,
+              "entry",
+            );
+          }
+          return;
+        }
+        if (phase.kind === "lay") {
+          const eye = needleLen * 0.55;
+          const tip = len * phase.t;
+          const end = Math.max(Math.min(2.2, tip), tip - eye);
+          if (end <= 0.4) return;
+          const t = Math.min(1, end / len);
+          drawThread(
+            ctx,
+            from.x,
+            from.y,
+            from.x + dx * t,
+            from.y + dy * t,
+            color,
+            width,
+            clothDark,
+            true,
+            "entry",
+          );
+          return;
+        }
+        if (phase.kind === "back" && back) {
+          drawReverseThread(ctx, to, back, phase.t, color, clothDark, sag);
+        }
+        drawThread(ctx, from.x, from.y, to.x, to.y, color, width, clothDark, true, "both");
+      },
+      needle(amount) {
+        const phase = runningPhase(amount, lead, tail, back !== null);
+        if (phase.kind === "up") {
+          return {
+            x: from.x,
+            y: from.y,
+            angle: Math.atan2(dy, dx),
+            sink: phase.sink,
+            length: needleLen,
+            upright: true,
+            quiet: true,
+            entry: from,
+          };
+        }
+        if (phase.kind === "lay") {
+          return {
+            x: from.x + dx * phase.t,
+            y: from.y + dy * phase.t,
+            angle: Math.atan2(dy, dx),
+            sink: 0,
+            length: needleLen,
+            quiet: true,
+            entry: lead ? from : undefined,
+            exit: tail && phase.t > 0.86 ? to : undefined,
+          };
+        }
+        if (phase.kind === "down") {
+          return {
+            x: to.x,
+            y: to.y,
+            angle: Math.atan2(dy, dx),
+            sink: phase.sink,
+            length: needleLen,
+            upright: true,
+            quiet: true,
+            entry: from,
+            exit: to,
+          };
+        }
+        const tip = back ? reversePoint(to, back, sag, phase.t) : to;
+        return {
+          x: tip.x,
+          y: tip.y,
+          angle: Math.atan2((back?.y ?? to.y) - to.y, (back?.x ?? to.x) - to.x),
+          sink: 0.92,
+          length: needleLen,
+          upright: true,
+          quiet: true,
+          entry: tip,
+          exit: to,
+        };
+      },
+    });
+  });
+}
+
+function pushReverseTravel(
+  marks: SewMark[],
+  a: Point,
+  b: Point,
+  charIndex: number,
+  color: string,
+  clothDark: boolean,
+  side: number,
+  pace: number,
+) {
+  const len = distance(a, b);
+  if (len < 0.8) return;
+  const sag = runningSag(len, side);
+  marks.push({
+    charIndex,
+    weight: pace * Math.max(0.55, Math.min(1.2, len / 14)),
+    draw(ctx, amount) {
+      if (amount <= 0.02 || amount >= 1) return;
+      drawReverseThread(ctx, a, b, amount, color, clothDark, sag);
+    },
+    needle(amount) {
+      const tip = reversePoint(a, b, sag, Math.max(0.04, amount));
+      return {
+        x: tip.x,
+        y: tip.y,
+        angle: Math.atan2(b.y - a.y, b.x - a.x),
+        sink: 0.92,
+        length: Math.min(12, Math.max(7, len * 0.35)),
+        upright: true,
+        quiet: true,
+        entry: tip,
+        exit: a,
+      };
+    },
+  });
+}
+
+function runningPhase(amount: number, lead: boolean, tail: boolean, hasBack: boolean) {
+  const backShare = hasBack ? 0.32 : 0;
+  const front = 1 - backShare;
+  const rise = lead ? 0.46 * front : 0;
+  const sink = tail ? 0.32 * front : 0;
+  const layEnd = Math.max(rise, front - sink);
+  if (amount <= rise && rise > 0) {
+    return { kind: "up" as const, sink: 1 - amount / rise, t: 0 };
+  }
+  if (amount < layEnd) {
+    const span = Math.max(0.05, layEnd - rise);
+    return { kind: "lay" as const, sink: 0, t: (amount - rise) / span };
+  }
+  if (amount < front || !hasBack) {
+    const span = Math.max(0.05, front - layEnd);
+    return { kind: "down" as const, sink: sink === 0 ? 1 : (amount - layEnd) / span, t: 1 };
+  }
+  return { kind: "back" as const, sink: 1, t: (amount - front) / backShare };
+}
+
+function runningSag(len: number, side: number) {
+  const bow = Math.min(5.2, Math.max(2.3, len * 0.36));
+  return (side % 2 === 0 ? 1 : -1) * bow;
+}
+
+function reverseCurve(from: Point, to: Point, sag: number, amount: number) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const c = {
+    x: (from.x + to.x) / 2 + (-dy / len) * sag,
+    y: (from.y + to.y) / 2 + (dx / len) * sag,
+  };
+  const steps = Math.max(2, Math.round(7 * Math.max(amount, 0.2)));
+  const pts: Point[] = [];
+  const uMax = Math.max(0.04, Math.min(1, amount));
+  for (let i = 0; i <= steps; i++) {
+    const t = (i / steps) * uMax;
+    const u = 1 - t;
+    pts.push({
+      x: u * u * from.x + 2 * u * t * c.x + t * t * to.x,
+      y: u * u * from.y + 2 * u * t * c.y + t * t * to.y,
+    });
+  }
+  return pts;
+}
+
+function reversePoint(from: Point, to: Point, sag: number, amount: number) {
+  const pts = reverseCurve(from, to, sag, amount);
+  return pts[pts.length - 1];
+}
+
+function drawReverseThread(
+  ctx: CanvasRenderingContext2D,
+  from: Point,
+  to: Point,
+  amount: number,
+  color: string,
+  clothDark: boolean,
+  sag: number,
+) {
+  const pts = reverseCurve(from, to, sag, amount);
+  if (pts.length < 2) return;
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  ctx.strokeStyle = clothDark ? "rgba(0,0,0,0.32)" : "rgba(48, 28, 16, 0.2)";
+  ctx.lineWidth = 3.6;
+  ctx.stroke();
+  ctx.globalAlpha = clothDark ? 0.72 : 0.8;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.7;
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+  ctx.setLineDash([1.1, 1.7]);
+  ctx.strokeStyle = clothDark ? "rgba(18, 14, 12, 0.55)" : "rgba(255, 248, 236, 0.78)";
+  ctx.lineWidth = 2.3;
+  ctx.stroke();
+  ctx.restore();
 }
 
 function collectChain(

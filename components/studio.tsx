@@ -178,7 +178,7 @@ export function Studio() {
       }
       const sew = sewRef.current;
       if (sew.duration < 0) {
-        sew.duration = sewDurationFor(sceneSewWeight(scene, sew.from));
+        sew.duration = sewDurationFor(sceneSewWeight(scene, sew.from), scene.sewPace);
       }
       const progress =
         sew.duration === 0

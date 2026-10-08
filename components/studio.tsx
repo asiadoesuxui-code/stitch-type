@@ -14,11 +14,10 @@ import {
 
 const DEFAULTS = {
   text: "",
-  stitch: "satin" as StitchId,
-  thread: "#9c3048",
-  accent: "#1f6b45",
-  fabric: "#efe6d4",
-  scale: 1,
+  stitch: "cross" as StitchId,
+  thread: "#5e1a1a",
+  accent: "#8aadfd",
+  fabric: "#fff8ec",
 };
 
 export function Studio() {
@@ -31,14 +30,12 @@ export function Studio() {
   const [thread, setThread] = useState(DEFAULTS.thread);
   const [accent, setAccent] = useState(DEFAULTS.accent);
   const [fabric, setFabric] = useState(DEFAULTS.fabric);
-  const [scale, setScale] = useState(DEFAULTS.scale);
   const [insetBottom, setInsetBottom] = useState(180);
   const [stage, setStage] = useState({ width: 0, height: 0 });
   const [fontReady, setFontReady] = useState(false);
   const [focused, setFocused] = useState(true);
   const [caret, setCaret] = useState(0);
 
-  const active = STITCHES.find((item) => item.id === stitch) ?? STITCHES[0];
   const darkCloth = relativeLuminance(fabric) < 0.42;
 
   useEffect(() => {
@@ -93,7 +90,7 @@ export function Studio() {
         thread,
         accent,
         fabric,
-        scale,
+        scale: measureWord(text, fontFamily(), width, height, insetBottom).stitchScale,
         fontFamily: fontFamily(),
         insetBottom,
       });
@@ -103,7 +100,7 @@ export function Studio() {
     const observer = new ResizeObserver(paint);
     observer.observe(parent);
     return () => observer.disconnect();
-  }, [text, stitch, thread, accent, fabric, scale, insetBottom, fontReady]);
+  }, [text, stitch, thread, accent, fabric, insetBottom, fontReady]);
 
   const layout =
     stage.width > 0
@@ -120,7 +117,7 @@ export function Studio() {
       stage.width,
       stage.height,
       insetBottom,
-      scale,
+      word.stitchScale,
     );
     const prefix = measureTextWidth(
       text.slice(0, caret),
@@ -198,72 +195,51 @@ export function Studio() {
         className="absolute inset-x-0 bottom-0 z-20 px-3 pb-3 sm:px-5 sm:pb-5"
       >
         <div
-          className={`mx-auto w-full max-w-3xl rounded-3xl border p-3 shadow-[0_20px_50px_rgba(40,24,12,0.14)] backdrop-blur-md sm:p-4 ${
+          className={`mx-auto w-fit max-w-full rounded-[14px] border p-3 pr-5 backdrop-blur-md sm:p-4 sm:pr-6 ${
             darkCloth
               ? "border-white/10 bg-[#1c1916]/80 text-[#f6f1e8]"
               : "border-[#3a2a1c]/10 bg-[#fffaf3]/82 text-[#2a2118]"
           }`}
         >
-          <p className="px-1 text-xs leading-5 opacity-70">{active.blurb}</p>
+          <div className="flex items-center gap-3 overflow-x-auto md:gap-12">
+            <div
+              role="radiogroup"
+              aria-label="Stitch type"
+              className="flex gap-1"
+            >
+              {STITCHES.map((item) => {
+                const selected = item.id === stitch;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => {
+                      setStitch(item.id);
+                      wordRef.current?.focus();
+                    }}
+                    className={`flex size-16 shrink-0 flex-col items-center justify-center gap-0.5 rounded-[10px] px-1 text-[11px] tracking-wide whitespace-nowrap transition ${
+                      selected
+                        ? darkCloth
+                          ? "bg-white/10"
+                          : "bg-[#2a2118]/6"
+                        : "hover:bg-black/4"
+                    }`}
+                  >
+                    <StitchIcon id={item.id} />
+                    <span>{item.name}</span>
+                  </button>
+                );
+              })}
+            </div>
 
-          <div
-            role="radiogroup"
-            aria-label="Stitch type"
-            className="mt-2 flex gap-1.5 overflow-x-auto pb-1"
-          >
-            {STITCHES.map((item) => {
-              const selected = item.id === stitch;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  role="radio"
-                  aria-checked={selected}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => {
-                    setStitch(item.id);
-                    wordRef.current?.focus();
-                  }}
-                  className={`flex min-w-[4.6rem] flex-1 flex-col items-center gap-1 rounded-2xl px-2 py-2 text-[11px] tracking-wide transition ${
-                    selected
-                      ? darkCloth
-                        ? "bg-white/10"
-                        : "bg-[#2a2118]/6"
-                      : "hover:bg-black/4"
-                  }`}
-                  style={
-                    selected
-                      ? { boxShadow: `inset 0 -2px 0 ${thread}` }
-                      : undefined
-                  }
-                >
-                  <StitchIcon id={item.id} />
-                  <span>{item.name}</span>
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-3 px-1">
-            <Swatch label="Thread" value={thread} onChange={setThread} />
-            <Swatch label="Accent" value={accent} onChange={setAccent} />
-            <Swatch label="Cloth" value={fabric} onChange={setFabric} />
-            <label className="ml-auto flex min-w-36 flex-1 items-center gap-3 sm:max-w-56">
-              <span className="text-[11px] font-medium tracking-[0.16em] uppercase opacity-60">
-                Size
-              </span>
-              <input
-                type="range"
-                min={0.7}
-                max={1.55}
-                step={0.01}
-                value={scale}
-                aria-label="Stitch size"
-                onChange={(event) => setScale(Number(event.target.value))}
-                className="stitch-range"
-                style={{ color: thread }}
-              />
-            </label>
+            <div className="flex shrink-0 items-center gap-x-4">
+              <Swatch label="Thread" value={thread} onChange={setThread} />
+              <Swatch label="Accent" value={accent} onChange={setAccent} />
+              <Swatch label="Cloth" value={fabric} onChange={setFabric} />
+            </div>
           </div>
         </div>
       </div>
@@ -283,7 +259,7 @@ function Swatch({
   return (
     <label className="flex items-center gap-2">
       <span
-        className="relative h-7 w-7 overflow-hidden rounded-full shadow-[inset_0_0_0_1px_rgba(40,24,12,0.18)]"
+        className="relative h-6 w-6 overflow-hidden rounded-full shadow-[inset_0_0_0_1px_rgba(40,24,12,0.18)]"
         style={{ background: value }}
       >
         <input

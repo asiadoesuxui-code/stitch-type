@@ -6,7 +6,7 @@
 
 body {
   margin: 0;
-  background: #efe6d4;
+  background: #fff8ec;
   color: #2a2118;
   font-family: var(--font-sans);
 }
@@ -24,7 +24,7 @@ body {
 }
 
 .word-field::selection {
-  background: rgba(156, 48, 72, 0.28);
+  background: rgba(94, 26, 26, 0.28);
   color: transparent;
 }
 
@@ -50,29 +50,3 @@ body {
   }
 }
 
-.stitch-range {
-  appearance: none;
-  width: 100%;
-  height: 2px;
-  border-radius: 999px;
-  background: currentColor;
-  opacity: 0.85;
-  cursor: pointer;
-}
-
-.stitch-range::-webkit-slider-thumb {
-  appearance: none;
-  width: 14px;
-  height: 14px;
-  border-radius: 999px;
-  background: currentColor;
-  box-shadow: 0 0 0 3px rgba(255, 250, 243, 0.85);
-}
-
-.stitch-range::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border: 0;
-  border-radius: 999px;
-  background: currentColor;
-}

@@ -9,7 +9,7 @@ export const STITCHES = [
     id: "satin",
     name: "Satin",
     label: "Satin stitch",
-    blurb: "Straight threads laid side by side, striped with the accent color.",
+    blurb: "Straight threads laid side by side in a single thread color.",
   },
   {
     id: "knot",
@@ -73,11 +73,15 @@ const CASES: Array<Array<[number, number]>> = [
   [],
 ];
 
+const STITCH_SCALE_MIN = 0.7;
+const STITCH_SCALE_MAX = 1.55;
+
 export type WordLayout = {
   fontSize: number;
   letterSpacing: number;
   centerY: number;
   textWidth: number;
+  stitchScale: number;
 };
 
 export function measureWord(
@@ -92,7 +96,8 @@ export function measureWord(
   const maxW = width * 0.88;
   const maxH = Math.max(40, (height - insetBottom) * 0.78);
   const centerY = (height - insetBottom) / 2;
-  let size = Math.min(maxH * 0.92, width * 0.42);
+  const maxSize = Math.min(maxH * 0.92, width * 0.42);
+  let size = maxSize;
   const sample = text.trim();
 
   if (ctx && sample) {
@@ -120,7 +125,14 @@ export function measureWord(
     letterSpacing: size * 0.035,
     centerY,
     textWidth,
+    stitchScale: stitchScaleFor(size, maxSize),
   };
+}
+
+function stitchScaleFor(fontSize: number, maxFontSize: number) {
+  if (maxFontSize <= 0) return STITCH_SCALE_MAX;
+  const ratio = Math.min(1, Math.max(0, fontSize / maxFontSize));
+  return Math.max(STITCH_SCALE_MIN, STITCH_SCALE_MAX * ratio);
 }
 
 export function measureTextWidth(
@@ -462,9 +474,7 @@ function drawSatin(
     maxS = Math.max(maxS, s);
   }
 
-  let band = 0;
   for (let t = minT; t <= maxT; t += spacing) {
-    const color = band % 8 < 2 ? options.accent : options.thread;
     let runStart: number | null = null;
     for (let s = minS; s <= maxS; s += 1) {
       const x = Math.round(nx * t + dx * s);
@@ -485,7 +495,7 @@ function drawSatin(
             (ny * t + dy * runStart) / mask.scale,
             (nx * t + dx * end) / mask.scale,
             (ny * t + dy * end) / mask.scale,
-            color,
+            options.thread,
             width,
             clothDark,
           );
@@ -493,7 +503,6 @@ function drawSatin(
         runStart = null;
       }
     }
-    band++;
   }
 }
 

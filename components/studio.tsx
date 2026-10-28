@@ -78,10 +78,15 @@ export function Studio() {
 
   useEffect(() => {
     let cancel = false;
-    const family = fontFamily();
-    document.fonts.load(`600 120px ${family}`).then(() => {
-      if (!cancel) setFontReady(true);
-    });
+    const family = primaryFontFamily();
+    document.fonts.load(`600 120px ${family}`).then(
+      () => {
+        if (!cancel) setFontReady(true);
+      },
+      () => {
+        if (!cancel) setFontReady(true);
+      },
+    );
     wordRef.current?.focus();
     return () => {
       cancel = true;
@@ -492,6 +497,13 @@ function fontFamily() {
     .getPropertyValue("--font-display")
     .trim();
   return family || "Georgia, serif";
+}
+
+function primaryFontFamily() {
+  // The display variable is a family list. fonts.load rejects the whole list
+  // when the local() fallback face is missing, which left the cloth blank.
+  const first = fontFamily().split(",")[0]?.trim();
+  return first || "Georgia";
 }
 
 function relativeLuminance(hex: string) {

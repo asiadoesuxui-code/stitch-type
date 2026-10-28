@@ -1971,6 +1971,8 @@ function chainsForComponent(
   const dist = chamferDistance(ink, w, h);
   const skel = ink.slice();
   thinZhangSuen(skel, w, h);
+  const joined = joinedLetter(ink, skel, w, h, pixel, originX, originY);
+  if (joined.length) return joined;
   const traced = traceSkeleton(skel, w, h)
     .map((chain) => skeletonToWorld(chain, dist, w, h, pixel, originX, originY))
     .filter((chain) => chain.pts.length >= 2);
@@ -1991,6 +1993,305 @@ function chainsForComponent(
   return chains;
 }
 
+
+function joinedLetter(
+  ink: Uint8Array,
+  skel: Uint8Array,
+  w: number,
+  h: number,
+  pixel: number,
+  originX: number,
+  originY: number,
+) {
+  const holes = interiorHoles(ink, w, h).filter((hole) => hole.length > 36);
+  if (!holes.length) return [];
+  const loops = holes
+    .map((hole) => medialLoop(hole, ink, w, h, pixel, originX, originY))
+    .filter((loop): loop is RopeChain => loop !== null);
+  if (!loops.length) return [];
+  if (loops.length === 1) {
+    const stem = stemChain(skel, loops, w, h, pixel, originX, originY);
+    if (!stem) return loops;
+    return [fuseStem(stem, loops[0])];
+  }
+  const stems = stemChain(skel, loops, w, h, pixel, originX, originY);
+  return stems ? [...loops, seatStem(stems, loops)] : loops;
+}
+
+function interiorHoles(ink: Uint8Array, w: number, h: number) {
+  const seen = new Uint8Array(ink.length);
+  const stack: number[] = [];
+  const push = (index: number) => {
+    if (index < 0 || index >= ink.length || seen[index] || ink[index]) return;
+    seen[index] = 1;
+    stack.push(index);
+  };
+  for (let x = 0; x < w; x++) {
+    push(x);
+    push((h - 1) * w + x);
+  }
+  for (let y = 0; y < h; y++) {
+    push(y * w);
+    push(y * w + w - 1);
+  }
+  while (stack.length) {
+    const index = stack.pop() as number;
+    const x = index % w;
+    if (x > 0) push(index - 1);
+    if (x + 1 < w) push(index + 1);
+    if (index >= w) push(index - w);
+    if (index + w < ink.length) push(index + w);
+  }
+  const holes: number[][] = [];
+  for (let seed = 0; seed < ink.length; seed++) {
+    if (ink[seed] || seen[seed]) continue;
+    const hole: number[] = [];
+    seen[seed] = 1;
+    stack.push(seed);
+    while (stack.length) {
+      const index = stack.pop() as number;
+      hole.push(index);
+      const x = index % w;
+      for (const next of [index - 1, index + 1, index - w, index + w]) {
+        if (next < 0 || next >= ink.length || seen[next] || ink[next]) continue;
+        if (Math.abs((next % w) - x) > 1) continue;
+        seen[next] = 1;
+        stack.push(next);
+      }
+    }
+    if (hole.length > 36 && hole.length < ink.length * 0.6) holes.push(hole);
+  }
+  holes.sort((a, b) => b.length - a.length);
+  return holes.slice(0, 2);
+}
+
+function medialLoop(
+  hole: number[],
+  ink: Uint8Array,
+  w: number,
+  h: number,
+  pixel: number,
+  originX: number,
+  originY: number,
+) {
+  let sx = 0;
+  let sy = 0;
+  for (const index of hole) {
+    sx += index % w;
+    sy += (index / w) | 0;
+  }
+  const cx = sx / hole.length;
+  const cy = sy / hole.length;
+  const samples = 96;
+  const raw: Array<{ x: number; y: number; thick: number }> = [];
+  for (let i = 0; i < samples; i++) {
+    const angle = (i / samples) * Math.PI * 2;
+    const dx = Math.cos(angle);
+    const dy = Math.sin(angle);
+    let inner = -1;
+    let outer = -1;
+    const limit = Math.hypot(w, h);
+    for (let t = 0.5; t < limit; t += 0.5) {
+      const x = Math.round(cx + dx * t);
+      const y = Math.round(cy + dy * t);
+      if (x < 0 || y < 0 || x >= w || y >= h) break;
+      const on = ink[y * w + x] === 1;
+      if (inner < 0) {
+        if (on) inner = t;
+      } else if (!on) {
+        outer = t;
+        break;
+      }
+    }
+    if (inner < 0 || outer < 0 || outer <= inner + 1) continue;
+    const mid = (inner + outer) / 2;
+    raw.push({
+      x: originX + (cx + dx * mid) * pixel,
+      y: originY + (cy + dy * mid) * pixel,
+      thick: (outer - inner) * pixel,
+    });
+  }
+  if (raw.length < samples * 0.72) return null;
+  const walls = raw.map((sample) => sample.thick).sort((a, b) => a - b);
+  const wall = walls[Math.floor(walls.length * 0.32)] || walls[0];
+  const center = { x: originX + cx * pixel, y: originY + cy * pixel };
+  const pts: Point[] = [];
+  const radii: number[] = [];
+  for (const sample of raw) {
+    const span = Math.hypot(sample.x - center.x, sample.y - center.y) || 1;
+    const inner = span - sample.thick / 2;
+    const thick = Math.min(sample.thick, wall * 1.2);
+    const mid = inner + thick / 2;
+    const dirX = (sample.x - center.x) / span;
+    const dirY = (sample.y - center.y) / span;
+    pts.push({ x: center.x + dirX * mid, y: center.y + dirY * mid });
+    radii.push(thick / 2);
+  }
+  return finishChain({ pts, radii, closed: true });
+}
+
+function stemChain(
+  skel: Uint8Array,
+  loops: RopeChain[],
+  w: number,
+  h: number,
+  pixel: number,
+  originX: number,
+  originY: number,
+) {
+  const radius = loops[0].radii[0] || 8;
+  const mask = new Uint8Array(skel.length);
+  let count = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!skel[y * w + x]) continue;
+      const point = { x: originX + (x + 0.5) * pixel, y: originY + (y + 0.5) * pixel };
+      let nearest = Infinity;
+      for (const loop of loops) {
+        nearest = Math.min(nearest, pointDistance(point, loop));
+      }
+      if (nearest > radius * 0.78) {
+        mask[y * w + x] = 1;
+        count++;
+      }
+    }
+  }
+  if (count < 8) return null;
+  const dist = new Float32Array(mask.length);
+  dist.fill(radius / Math.max(pixel, 0.001));
+  let best: RopeChain | null = null;
+  let bestLen = 0;
+  for (const chain of traceSkeleton(mask, w, h)) {
+    const world = skeletonToWorld(chain, dist, w, h, pixel, originX, originY);
+    const finished = finishChain(world);
+    if (!finished || finished.closed) continue;
+    const length = chainLength(finished.pts, false);
+    if (length > bestLen) {
+      best = finished;
+      bestLen = length;
+    }
+  }
+  if (!best || bestLen < radius * 1.2) return null;
+  best.radii = best.radii.map(() => radius);
+  best.pitch = loops[0].pitch;
+  return best;
+}
+
+function pointDistance(point: Point, chain: RopeChain) {
+  let best = Infinity;
+  const count = chain.closed ? chain.pts.length : Math.max(0, chain.pts.length - 1);
+  for (let i = 0; i < count; i++) {
+    const a = chain.pts[i];
+    const b = chain.pts[(i + 1) % chain.pts.length];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len2 = dx * dx + dy * dy || 1;
+    let t = ((point.x - a.x) * dx + (point.y - a.y) * dy) / len2;
+    t = Math.max(0, Math.min(1, t));
+    best = Math.min(best, Math.hypot(point.x - (a.x + dx * t), point.y - (a.y + dy * t)));
+  }
+  return best;
+}
+
+function fuseStem(stem: RopeChain, bowl: RopeChain) {
+  const radius = bowl.radii[0] || stem.radii[0] || 8;
+  const stemPts = stem.pts.slice();
+  if (pointDistance(stemPts[0], bowl) < pointDistance(stemPts[stemPts.length - 1], bowl)) stemPts.reverse();
+  while (stemPts.length > 6 && pointDistance(stemPts[stemPts.length - 1], bowl) < radius * 0.28) {
+    stemPts.pop();
+  }
+  const n = bowl.pts.length;
+  const tip = stemPts[stemPts.length - 1];
+  const prev = stemPts[Math.max(0, stemPts.length - 3)];
+  const stemDir = unit(tip.x - prev.x, tip.y - prev.y);
+  let join = 0;
+  let bestScore = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const dist = Math.hypot(bowl.pts[i].x - tip.x, bowl.pts[i].y - tip.y);
+    if (dist > radius * 2.4) continue;
+    const tangent = unit(
+      bowl.pts[(i + 3) % n].x - bowl.pts[(i - 3 + n) % n].x,
+      bowl.pts[(i + 3) % n].y - bowl.pts[(i - 3 + n) % n].y,
+    );
+    const align = Math.abs(stemDir.x * tangent.x + stemDir.y * tangent.y);
+    const score = align * 3 - dist / radius;
+    if (score > bestScore) {
+      bestScore = score;
+      join = i;
+    }
+  }
+  const forwardTangent = unit(
+    bowl.pts[(join + 3) % n].x - bowl.pts[join].x,
+    bowl.pts[(join + 3) % n].y - bowl.pts[join].y,
+  );
+  const backTangent = unit(
+    bowl.pts[(join - 3 + n) % n].x - bowl.pts[join].x,
+    bowl.pts[(join - 3 + n) % n].y - bowl.pts[join].y,
+  );
+  const forward =
+    stemDir.x * forwardTangent.x + stemDir.y * forwardTangent.y >=
+    stemDir.x * backTangent.x + stemDir.y * backTangent.y;
+  const leaveIndex = forward ? (join + 7) % n : (join - 7 + n) % n;
+  const leave = bowl.pts[leaveIndex];
+  const approach = stemPts[Math.max(0, stemPts.length - 6)];
+  const corner = bowl.pts[join];
+  const curve: Point[] = [];
+  for (let step = 0; step <= 14; step++) {
+    const t = step / 14;
+    const u = 1 - t;
+    curve.push({
+      x: u * u * approach.x + 2 * u * t * corner.x + t * t * leave.x,
+      y: u * u * approach.y + 2 * u * t * corner.y + t * t * leave.y,
+    });
+  }
+  const rest: Point[] = [];
+  for (let k = 1; k <= n; k++) {
+    const index = forward ? (leaveIndex + k) % n : (leaveIndex - k + n * 2) % n;
+    rest.push(bowl.pts[index]);
+    if (index === join) break;
+  }
+  const merged = stemPts.slice(0, Math.max(1, stemPts.length - 6)).concat(curve, rest);
+  const bowlLen = chainLength(bowl.pts, true);
+  const ridges = Math.max(6, Math.round(bowlLen / (Math.max(16, radius * 3.6) / 3)));
+  return {
+    pts: merged,
+    radii: merged.map(() => radius),
+    closed: false,
+    pitch: (bowlLen * 3) / ridges,
+    capStart: true,
+    capEnd: false,
+  };
+}
+
+function seatStem(stem: RopeChain, loops: RopeChain[]) {
+  const pts = stem.pts.slice();
+  const radius = loops[0].radii[0] || 8;
+  const pull = (index: number) => {
+    const tip = pts[index];
+    let nearest = Infinity;
+    let loop = loops[0];
+    for (const candidate of loops) {
+      const dist = pointDistance(tip, candidate);
+      if (dist < nearest) {
+        nearest = dist;
+        loop = candidate;
+      }
+    }
+    if (nearest < radius * 0.3 || nearest > radius * 2) return;
+    const prev = pts[Math.max(0, Math.min(pts.length - 1, index === 0 ? 1 : index - 1))];
+    const dir = unit(tip.x - prev.x, tip.y - prev.y);
+    for (let step = 1; step <= 10; step++) {
+      const next = { x: tip.x + dir.x * step * radius * 0.08, y: tip.y + dir.y * step * radius * 0.08 };
+      if (pointDistance(next, loop) < radius * 0.62) {
+        pts[index] = next;
+        return;
+      }
+    }
+  };
+  pull(0);
+  pull(pts.length - 1);
+  return { ...stem, pts, radii: pts.map(() => radius), pitch: loops[0].pitch };
+}
 
 function inkBounds(ink: Uint8Array, w: number, h: number) {
   let minX = w;

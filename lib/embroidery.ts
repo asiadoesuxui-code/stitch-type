@@ -2903,105 +2903,72 @@ function ropeNoise(x: number, y: number) {
   return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
 }
 
-let yarnTile: { w: number; h: number; data: Float32Array } | null = null;
+type PlyShade = { light: number; fiber: number; cover: number };
 
-function blurWrap(src: Float32Array, w: number, h: number, radius: number) {
-  const tmp = new Float32Array(src.length);
-  const dst = new Float32Array(src.length);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      let sum = 0;
-      let count = 0;
-      for (let k = -radius; k <= radius; k++) {
-        sum += src[y * w + ((x + k + w) % w)];
-        count++;
-      }
-      tmp[y * w + x] = sum / count;
-    }
+function ropeSurface(lateral: number, along: number, radius: number, pitch: number, plyGain: number, overhang: number): PlyShade {
+  const plyR = radius * 0.56;
+  const orbit = Math.max(0.4, radius - plyR);
+  const span = Math.max(pitch, radius * 4.8);
+  const wobble = Math.sin(along / (radius * 18)) * 0.16;
+  const phase = (along / span) * Math.PI * 2 + wobble;
+  let bestZ = -1e9;
+  let secondZ = -1e9;
+  let signed = -1e9;
+  let bestDx = 0;
+  let bestNz = 1;
+  let bestR = plyR;
+  let which = 0;
+  for (let ply = 0; ply < 3; ply++) {
+    const ang = phase + (ply * Math.PI * 2) / 3;
+    const cx = Math.cos(ang) * orbit;
+    const cz = Math.sin(ang) * orbit;
+    const dx = lateral - cx;
+    const inside = plyR - Math.abs(dx);
+    if (inside > signed) signed = inside;
+    if (inside <= 0) continue;
+    const nz = Math.sqrt(Math.max(0, plyR * plyR - dx * dx));
+    const z = cz + nz;
+    if (z > bestZ) {
+      secondZ = bestZ;
+      bestZ = z;
+      bestDx = dx;
+      bestNz = nz;
+      bestR = plyR;
+      which = ply;
+    } else if (z > secondZ) secondZ = z;
   }
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      let sum = 0;
-      let count = 0;
-      for (let k = -radius; k <= radius; k++) {
-        sum += tmp[((y + k + h) % h) * w + x];
-        count++;
-      }
-      dst[y * w + x] = sum / count;
-    }
+  if (overhang > 0) {
+    const cap = Math.sqrt(Math.max(0, radius * radius - overhang * overhang));
+    signed = Math.min(signed, cap - Math.abs(lateral));
   }
-  return dst;
+  if (bestZ < -1e8) return { light: 0, fiber: 0, cover: signed };
+  const nx = bestDx / bestR;
+  const nz = bestNz / bestR;
+  const ndotl = Math.max(0, nx * -0.18 + nz * 0.98);
+  const wrap = 0.36 + ndotl * 0.64;
+  const crevice = secondZ > -1e8 ? Math.max(0, 1 - (bestZ - secondZ) / (bestR * 0.7)) : 0;
+  const light = Math.max(0, Math.min(1, wrap * (1 - crevice * 0.28 * (0.35 + 0.65 * plyGain))));
+  const around = Math.atan2(bestDx, bestNz);
+  const alongPly = along / Math.max(8, bestR) + which * 5.3;
+  const fuzz =
+    (ropeNoise(alongPly * 0.32, around * 4.2 + which * 1.3) - 0.5) * 0.66 +
+    (ropeNoise(alongPly * 0.85 + 2.2, around * 8.5) - 0.5) * 0.34;
+  return { light, fiber: fuzz * 0.7 * (0.3 + 0.7 * nz), cover: signed };
 }
 
-function yarnTileData() {
-  if (yarnTile) return yarnTile;
-  const w = 180;
-  const h = 96;
-  const raw = new Float32Array(w * h);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const u = x / w;
-      let plyDist = 1;
-      let center = 0;
-      for (let ply = 0; ply < 3; ply++) {
-        let dist = Math.abs(u - ply / 3);
-        dist = Math.min(dist, 1 - dist);
-        if (dist < plyDist) {
-          plyDist = dist;
-          center = ply / 3;
-        }
-      }
-      const across = plyDist / (1 / 6);
-      const strand = Math.exp(-across * across * 1.8);
-      const local = (u - center + 1) % 1;
-      const fiberPhase = local * 42 + Math.sin((y / h) * Math.PI * 2 + local * 9) * 0.85;
-      const band = Math.abs(fiberPhase - Math.round(fiberPhase));
-      const hair = Math.exp(-band * band * 22);
-      const gy = Math.sin((y / h) * Math.PI * 2);
-      const gx = Math.cos((y / h) * Math.PI * 2);
-      const grain = ropeNoise(x * 0.15 + local * 3, gy * 1.6 + gx * 0.35);
-      let value = (strand - 0.4) * 0.2;
-      value += (hair - 0.28) * 0.16 * (0.4 + 0.6 * strand);
-      value += (grain - 0.5) * 0.07;
-      value -= Math.pow(Math.min(1, across), 1.45) * 0.11;
-      raw[y * w + x] = value;
-    }
-  }
-  yarnTile = { w, h, data: blurWrap(raw, w, h, 1) };
-  return yarnTile;
-}
-
-function sampleYarn(u: number, v: number) {
-  const tile = yarnTileData();
-  const x = (((u % 1) + 1) % 1) * tile.w;
-  const y = (((v % 1) + 1) % 1) * tile.h;
-  const x0 = Math.floor(x) % tile.w;
-  const y0 = Math.floor(y) % tile.h;
-  const x1 = (x0 + 1) % tile.w;
-  const y1 = (y0 + 1) % tile.h;
-  const fx = x - Math.floor(x);
-  const fy = y - Math.floor(y);
-  const a = tile.data[y0 * tile.w + x0];
-  const b = tile.data[y0 * tile.w + x1];
-  const c = tile.data[y1 * tile.w + x0];
-  const d = tile.data[y1 * tile.w + x1];
-  return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
-}
-
-function sweepLift(lateral: number, along: number, radius: number, pitch: number, plyGain = 1) {
-  const span = Math.max(radius, 0.001);
-  const u = Math.max(-1, Math.min(1, lateral / span));
-  const facing = Math.sqrt(Math.max(0, 1 - u * u));
-  const angle = Math.atan2(u, facing);
-  const wobble = Math.sin(along / (span * 9)) * 0.18;
-  const twist = (along / Math.max(14, pitch)) * Math.PI * 2 + wobble;
-  const yarn = sampleYarn((angle + twist) / (Math.PI * 2), along / (Math.max(14, pitch) * 1.6));
-  const gain = 0.75 + 0.25 * plyGain;
-  const round = -0.05 + facing * 0.2;
-  const crown = Math.pow(facing, 1.6) * 0.11;
-  const lift = round + crown + yarn * 1.65 * (0.4 + 0.6 * facing) * gain;
-  if (lift <= 0.3) return Math.max(-0.4, lift);
-  return 0.3 + 0.09 * (1 - Math.exp(-(lift - 0.3) * 3.2));
+function yarnInk(r: number, g: number, b: number, light: number, fiber: number): [number, number, number] {
+  const avg = (r + g + b) / 3;
+  const sat = 0.7;
+  const baseR = r * sat + avg * (1 - sat);
+  const baseG = g * sat + avg * (1 - sat);
+  const baseB = b * sat + avg * (1 - sat);
+  const gain = 0.78 + light * 0.85;
+  const crown = light * light;
+  return [
+    clamp(baseR * gain * (1 - crown * 0.42) + 168 * crown * 0.42 + fiber * 90),
+    clamp(baseG * gain * (1 - crown * 0.42) + 98 * crown * 0.42 + fiber * 58),
+    clamp(baseB * gain * (1 - crown * 0.42) + 90 * crown * 0.42 + fiber * 50),
+  ];
 }
 
 type RopeSweep = {
@@ -3151,8 +3118,8 @@ function rasterRopeStamp(chains: RopeChain[], color: string, clothDark: boolean)
   const worldH = Math.max(1, maxY - minY + 4);
   minX -= 2;
   minY -= 2;
-  let ss = 2;
-  while (worldW * worldH * ss * ss > 2_200_000 && ss > 1.25) ss -= 0.25;
+  let ss = 3;
+  while (worldW * worldH * ss * ss > 3_400_000 && ss > 2) ss -= 0.5;
   const iw = Math.max(1, Math.ceil(worldW * ss));
   const ih = Math.max(1, Math.ceil(worldH * ss));
   const yarn = document.createElement("canvas");
@@ -3197,7 +3164,7 @@ function rasterRopeStamp(chains: RopeChain[], color: string, clothDark: boolean)
     if (sweep.disk) {
       const dx = x - sweep.x[0];
       const dy = y - sweep.y[0];
-      return { dist: Math.hypot(dx, dy), lateral: dx, along: dy, radius: sweep.r, ply: 1 };
+      return { dist: Math.hypot(dx, dy), lateral: dx, along: dy, radius: sweep.r, ply: 1, overhang: 0 };
     }
     const gx = Math.floor(x / cell);
     const gy = Math.floor(y / cell);
@@ -3215,6 +3182,8 @@ function rasterRopeStamp(chains: RopeChain[], color: string, clothDark: boolean)
     let lateral = 0;
     let along = 0;
     let rival = 1e12;
+    let bestT = 0;
+    let bestI = 0;
     for (let b = 0; b < bucket.length; b++) {
       const i = bucket[b];
       const j = (i + 1) % sweep.n;
@@ -3241,13 +3210,29 @@ function rasterRopeStamp(chains: RopeChain[], color: string, clothDark: boolean)
         best = dist;
         lateral = lat;
         along = arc;
+        bestT = t;
+        bestI = i;
       } else if (Math.abs(arc - along) > sweep.r * 2) {
         rival = Math.min(rival, dist);
       }
     }
     if (best > sweep.r * 1.35) return null;
+    let overhang = 0;
+    if (!sweep.closed) {
+      const j = (bestI + 1) % sweep.n;
+      const ax = sweep.x[bestI];
+      const ay = sweep.y[bestI];
+      const bx = sweep.x[j] - ax;
+      const by = sweep.y[j] - ay;
+      const len = Math.hypot(bx, by) || 1;
+      const px = ax + bx * bestT;
+      const py = ay + by * bestT;
+      const axial = ((x - px) * bx + (y - py) * by) / len;
+      if (bestI === 0 && bestT <= 0.001 && axial < 0) overhang = -axial;
+      if (j === sweep.n - 1 && bestT >= 0.999 && axial > 0) overhang = axial;
+    }
     const ply = smoothstep((rival - best) / (sweep.r * 1.15));
-    return { dist: best, lateral, along, radius: sweep.r, ply };
+    return { dist: best, lateral, along, radius: sweep.r, ply, overhang };
   };
 
   for (let iy = 0; iy < ih; iy++) {
@@ -3263,13 +3248,20 @@ function rasterRopeStamp(chains: RopeChain[], color: string, clothDark: boolean)
         pitch: number;
         disk: boolean;
         closed: boolean;
+        overhang: number;
       };
       let bowl: SweepHit | null = null;
       let stem: SweepHit | null = null;
       for (let s = 0; s < sweeps.length; s++) {
         const hit = nearest(sweeps[s], grids[s], x, y);
         if (!hit) continue;
-        const packed: SweepHit = { ...hit, pitch: sweeps[s].pitch, disk: sweeps[s].disk, closed: sweeps[s].closed };
+        const packed: SweepHit = {
+          ...hit,
+          pitch: sweeps[s].pitch,
+          disk: sweeps[s].disk,
+          closed: sweeps[s].closed,
+          overhang: hit.overhang,
+        };
         if (packed.closed || packed.disk) {
           if (!bowl || packed.dist < bowl.dist) bowl = packed;
         } else if (!stem || packed.dist < stem.dist) stem = packed;
@@ -3284,38 +3276,73 @@ function rasterRopeStamp(chains: RopeChain[], color: string, clothDark: boolean)
         }
       }
       if (blocked) continue;
-      const shade = (hit: SweepHit) => {
-        if (hit.disk) {
-          const facing = Math.sqrt(Math.max(0, 1 - (hit.dist / hit.radius) ** 2));
-          const ang = Math.atan2(hit.along, hit.lateral || 0.0001);
-          const yarn = sampleYarn(ang / (Math.PI * 8), 0.4 + hit.dist / (hit.radius * 5));
-          return -0.08 + facing * 0.26 + Math.pow(facing, 2) * 0.07 + yarn * 0.4 * facing;
-        }
-        return sweepLift(hit.lateral, hit.along, hit.radius, hit.pitch, hit.ply);
+      const paintDisk = (hit: SweepHit) => {
+        const facing = Math.sqrt(Math.max(0, 1 - (hit.dist / hit.radius) ** 2));
+        const fuzz = ropeNoise(x / Math.max(6, hit.radius * 0.8), y / Math.max(6, hit.radius * 0.8));
+        const light = Math.max(0, Math.min(1, 0.28 + facing * 0.5 + Math.pow(facing, 2) * 0.12));
+        return { light, fiber: (fuzz - 0.5) * 0.12 * facing, cover: hit.radius - hit.dist };
       };
-      let dist = primary.dist;
-      let lift = shade(primary);
-      if (bowl && stem) {
-        dist = smoothMin(bowl.dist, stem.dist, bowl.radius * 1.15);
-        const fade = smoothstep((bowl.dist - bowl.radius * 0.35) / (bowl.radius * 0.9));
-        lift = shade(bowl) * (1 - fade) + shade(stem) * fade;
+      const paintTube = (hit: SweepHit) =>
+        ropeSurface(hit.lateral, hit.along, hit.radius, hit.pitch, hit.ply, hit.overhang);
+      let light = 0;
+      let fiber = 0;
+      let cover = -1e9;
+      if (primary.disk && !(bowl && stem)) {
+        const disk = paintDisk(primary);
+        light = disk.light;
+        fiber = disk.fiber;
+        cover = disk.cover;
+      } else if (bowl && stem) {
+        const a = bowl.disk ? paintDisk(bowl) : paintTube(bowl);
+        const b = stem.disk ? paintDisk(stem) : paintTube(stem);
+        cover = Math.max(a.cover, b.cover);
+        const weight = a.cover <= 0 && b.cover <= 0 ? 0.5 : a.cover / (Math.max(0.001, a.cover) + Math.max(0.001, b.cover));
+        light = a.light * weight + b.light * (1 - weight);
+        fiber = a.fiber * weight + b.fiber * (1 - weight);
+      } else {
+        const tube = paintTube(primary);
+        light = tube.light;
+        fiber = tube.fiber;
+        cover = tube.cover;
       }
-      const tube = primary.radius;
-      if (dist > tube + 0.65 / ss) continue;
-      const solid = dist < tube - 0.55 / ss;
-      const alpha = solid ? 1 : Math.max(0, Math.min(1, (tube - dist) * ss + 0.45));
+      const aa = 2.2 / ss;
+      if (cover < -aa) continue;
+      const alpha = cover >= aa ? 1 : Math.max(0, Math.min(1, (cover + aa) / (aa * 2)));
       if (alpha < 0.03) continue;
-      const [rr, gg, bb] = tone(red, green, blue, lift);
+      const [rr, gg, bb] = yarnInk(red, green, blue, light, fiber);
       const o = (iy * iw + ix) * 4;
       data[o] = rr;
       data[o + 1] = gg;
       data[o + 2] = bb;
       data[o + 3] = Math.round(alpha * 255);
-      if (dist <= tube) {
+      if (cover >= 0) {
         maskData[o] = 255;
         maskData[o + 1] = 255;
         maskData[o + 2] = 255;
         maskData[o + 3] = 255;
+      }
+    }
+  }
+  for (let pass = 0; pass < 2; pass++) {
+    const keep = new Uint8Array(iw * ih);
+    for (let y = 1; y < ih - 1; y++) {
+      for (let x = 1; x < iw - 1; x++) {
+        const p = y * iw + x;
+        if (data[p * 4 + 3] < 200) continue;
+        let friends = 0;
+        for (let oy = -1; oy <= 1; oy++) {
+          for (let ox = -1; ox <= 1; ox++) {
+            if (ox === 0 && oy === 0) continue;
+            if (data[((y + oy) * iw + (x + ox)) * 4 + 3] > 80) friends++;
+          }
+        }
+        if (friends >= 2) keep[p] = 1;
+      }
+    }
+    for (let p = 0; p < iw * ih; p++) {
+      if (data[p * 4 + 3] > 200 && !keep[p]) {
+        data[p * 4 + 3] = 0;
+        maskData[p * 4 + 3] = 0;
       }
     }
   }
@@ -3328,14 +3355,14 @@ function rasterRopeStamp(chains: RopeChain[], color: string, clothDark: boolean)
   canvas.height = ih + pad * 2;
   const g = canvas.getContext("2d");
   if (!g) return null;
-  const drop = Math.max(1.5, maxR * ss * 0.1);
-  const blur = Math.max(1, maxR * ss * 0.07);
+  const drop = Math.max(1.6, maxR * ss * 0.08);
+  const blur = Math.max(1.1, maxR * ss * 0.085);
   g.save();
   g.filter = `blur(${blur.toFixed(2)}px)`;
   g.drawImage(mask, pad, pad + drop);
   g.restore();
   g.globalCompositeOperation = "source-in";
-  g.fillStyle = clothDark ? "rgba(0,0,0,0.42)" : "rgba(48, 22, 16, 0.4)";
+  g.fillStyle = clothDark ? "rgba(0,0,0,0.36)" : "rgba(62, 32, 28, 0.34)";
   g.fillRect(0, 0, canvas.width, canvas.height);
   g.globalCompositeOperation = "destination-out";
   g.drawImage(mask, pad, pad);

@@ -1939,7 +1939,7 @@ function paintSettledRope(ctx: CanvasRenderingContext2D, span: RopeSpan, alpha: 
   ctx.restore();
 }
 
-const ROPE_BULK = 1.58;
+const ROPE_BULK = 1.98;
 
 type RopeSeg = {
   x0: number;
@@ -2885,13 +2885,52 @@ function parkStem(stem: RopeChain, bowl: RopeChain) {
   return { ...stem, pts, radii: pts.map(() => radius), pitch: bowl.pitch };
 }
 
+function ropeNoise(x: number, y: number) {
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const fx = x - x0;
+  const fy = y - y0;
+  const sx = fx * fx * (3 - 2 * fx);
+  const sy = fy * fy * (3 - 2 * fy);
+  const hash = (ix: number, iy: number) => {
+    const n = Math.sin(ix * 127.1 + iy * 311.7) * 43758.5453;
+    return n - Math.floor(n);
+  };
+  const a = hash(x0, y0);
+  const b = hash(x0 + 1, y0);
+  const c = hash(x0, y0 + 1);
+  const d = hash(x0 + 1, y0 + 1);
+  return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
+}
+
 function sweepLift(lateral: number, along: number, radius: number, pitch: number, plyGain = 1) {
-  const u = Math.max(-1, Math.min(1, lateral / Math.max(radius, 0.001)));
+  const span = Math.max(radius, 0.001);
+  const u = Math.max(-1, Math.min(1, lateral / span));
   const facing = Math.sqrt(Math.max(0, 1 - u * u));
   const angle = Math.atan2(u, facing);
-  const phase = (along / Math.max(10, pitch)) * Math.PI * 2;
-  const ply = Math.cos(3 * (angle + phase));
-  return -0.26 + (0.34 + 0.62 * facing) * 0.55 + ply * 0.2 * facing * facing * plyGain;
+  const twist = (along / Math.max(10, pitch)) * Math.PI * 2;
+  let best = -2;
+  let which = 0;
+  for (let ply = 0; ply < 3; ply++) {
+    const cosine = Math.cos(angle + twist + (ply * Math.PI * 2) / 3);
+    if (cosine > best) {
+      best = cosine;
+      which = ply;
+    }
+  }
+  const delta = Math.acos(Math.max(-1, Math.min(1, best)));
+  const across = Math.min(1, delta / (Math.PI / 3));
+  const strand = Math.sqrt(Math.max(0, 1 - across * across));
+  const gain = 0.5 + 0.5 * plyGain;
+  const alongHelix = along / span + which * 5.1;
+  const fiber =
+    ropeNoise(alongHelix * 1.15, across * 14 + which * 2.3) * 0.58 +
+    ropeNoise(alongHelix * 2.7 + 1.8, across * 26 + which) * 0.42;
+  const streaks = (fiber - 0.5) * 0.28 * (0.3 + 0.7 * strand) * (0.4 + 0.6 * facing);
+  const groove = Math.pow(across, 1.35);
+  const body = -0.38 + strand * 0.48 * (0.28 + 0.72 * facing);
+  const spec = Math.pow(strand, 5) * facing * facing * 0.4 * gain;
+  return body - groove * 0.3 * gain + spec + streaks;
 }
 
 type RopeSweep = {
@@ -3147,10 +3186,15 @@ function rasterRopeStamp(chains: RopeChain[], color: string, clothDark: boolean)
         }
       }
       if (blocked) continue;
-      const shade = (hit: SweepHit) =>
-        hit.disk
-          ? -0.18 + 0.62 * Math.sqrt(Math.max(0, 1 - (hit.dist / hit.radius) ** 2))
-          : sweepLift(hit.lateral, hit.along, hit.radius, hit.pitch, hit.ply);
+      const shade = (hit: SweepHit) => {
+        if (hit.disk) {
+          const facing = Math.sqrt(Math.max(0, 1 - (hit.dist / hit.radius) ** 2));
+          const scale = Math.max(3.5, hit.radius * 0.22);
+          const fiber = ropeNoise(x / scale, y / (scale * 1.8)) * 0.62 + ropeNoise(x / (scale * 0.42), y / scale) * 0.38;
+          return -0.34 + facing * 0.5 + Math.pow(facing, 8) * 0.18 + (fiber - 0.5) * 0.16 * facing;
+        }
+        return sweepLift(hit.lateral, hit.along, hit.radius, hit.pitch, hit.ply);
+      };
       let dist = primary.dist;
       let lift = shade(primary);
       if (bowl && stem) {
@@ -3186,14 +3230,14 @@ function rasterRopeStamp(chains: RopeChain[], color: string, clothDark: boolean)
   canvas.height = ih + pad * 2;
   const g = canvas.getContext("2d");
   if (!g) return null;
-  const drop = Math.max(2, maxR * ss * 0.16);
-  const blur = Math.max(0.8, maxR * ss * 0.045);
+  const drop = Math.max(1.2, maxR * ss * 0.065);
+  const blur = Math.max(0.55, maxR * ss * 0.026);
   g.save();
   g.filter = `blur(${blur.toFixed(2)}px)`;
   g.drawImage(mask, pad, pad + drop);
   g.restore();
   g.globalCompositeOperation = "source-in";
-  g.fillStyle = clothDark ? "rgba(0,0,0,0.45)" : "rgba(42, 18, 12, 0.38)";
+  g.fillStyle = clothDark ? "rgba(0,0,0,0.5)" : "rgba(36, 14, 10, 0.5)";
   g.fillRect(0, 0, canvas.width, canvas.height);
   g.globalCompositeOperation = "destination-out";
   g.drawImage(mask, pad, pad);

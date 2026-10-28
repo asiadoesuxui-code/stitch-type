@@ -1185,7 +1185,7 @@ function thinZhangSuen(grid: Uint8Array, w: number, h: number) {
   const kill = new Uint8Array(grid.length);
   const at = (x: number, y: number) => grid[y * w + x];
   let changed = true;
-  for (let guard = 0; changed && guard < 80; guard++) {
+  for (let guard = 0; changed && guard < 400; guard++) {
     changed = false;
     for (let pass = 0; pass < 2; pass++) {
       kill.fill(0);
@@ -1510,6 +1510,15 @@ type RopeStamp = {
   h: number;
 };
 
+type RopeChain = {
+  pts: Point[];
+  radii: number[];
+  closed: boolean;
+  pitch: number;
+  capStart: boolean;
+  capEnd: boolean;
+};
+
 type RopeSpan = {
   pts: Point[];
   radii: number[];
@@ -1544,16 +1553,13 @@ function collectRope(
     crop.set(mask.mask.subarray((y + y0) * mask.w + x0, (y + y0) * mask.w + x0 + cw), y * cw);
   }
 
-  const letterH = (box.maxY - box.minY + 1) / mask.scale;
-  const step = Math.max(1, Math.ceil(Math.max(cw, ch) / 680));
+  const step = Math.max(1, Math.ceil(Math.max(cw, ch) / 560));
   const small = downsampleMask(crop, cw, ch, step);
   const pixel = step / mask.scale;
   const originX = x0 / mask.scale;
   const originY = y0 / mask.scale;
-  const dilateR = clampNum(1, 5, Math.round((letterH * 0.014) / pixel));
-  const ink = dilateMask(small.ink, small.w, small.h, dilateR);
 
-  const comps = inkComponents(ink, small.w, small.h);
+  const comps = inkComponents(small.ink, small.w, small.h);
   for (const comp of comps) {
     comp.charIndex = charIndexAt(originX + (comp.cx + 0.5) * pixel, ranges);
   }
@@ -1561,25 +1567,29 @@ function collectRope(
 
   for (const comp of comps) {
     const cropped = cropComponent(small.w, comp);
-    const stamp = shadeStamp(
+    const chains = chainsForComponent(
       cropped.ink,
       cropped.w,
       cropped.h,
-      options.thread,
-      clothDark,
+      pixel,
       originX + cropped.x0 * pixel,
       originY + cropped.y0 * pixel,
-      pixel,
     );
+    if (!chains.length) continue;
+    const stamp = rasterRopeStamp(chains, options.thread, clothDark);
     if (!stamp) continue;
-    // One pass per shape. Settled drawing is only this stamp, so later
-    // stitches cannot leave ghost outlines or needle trails on the letter.
+    const arc = arcForChain(longestChain(chains));
+    let radius = 0;
+    for (const chain of chains) {
+      for (const value of chain.radii) radius += value;
+    }
+    const count = chains.reduce((sum, chain) => sum + chain.radii.length, 0) || 1;
+    radius /= count;
+    // One stamp per shape. The settled pass draws that stamp only, so the
+    // sewing arc cannot dry into a second outline.
     const span: RopeSpan = {
-      pts: [
-        { x: stamp.x + stamp.w * 0.12, y: stamp.y + stamp.h * 0.2 },
-        { x: stamp.x + stamp.w * 0.88, y: stamp.y + stamp.h * Math.min(0.78, 0.42 + stamp.h * 0.001) },
-      ],
-      radii: [6, 6],
+      pts: arc,
+      radii: [radius, radius],
       capStart: true,
       capEnd: true,
       stamp,
@@ -1700,42 +1710,6 @@ function downsampleMask(src: Uint8Array, w: number, h: number, step: number) {
     }
   }
   return { ink, w: nw, h: nh };
-}
-
-function dilateMask(src: Uint8Array, w: number, h: number, radius: number) {
-  if (radius <= 0) return src;
-  const tmp = new Uint8Array(src.length);
-  const out = new Uint8Array(src.length);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      let on = 0;
-      const x0 = Math.max(0, x - radius);
-      const x1 = Math.min(w - 1, x + radius);
-      const row = y * w;
-      for (let xx = x0; xx <= x1; xx++) {
-        if (src[row + xx]) {
-          on = 1;
-          break;
-        }
-      }
-      tmp[row + x] = on;
-    }
-  }
-  for (let x = 0; x < w; x++) {
-    for (let y = 0; y < h; y++) {
-      let on = 0;
-      const y0 = Math.max(0, y - radius);
-      const y1 = Math.min(h - 1, y + radius);
-      for (let yy = y0; yy <= y1; yy++) {
-        if (tmp[yy * w + x]) {
-          on = 1;
-          break;
-        }
-      }
-      out[y * w + x] = on;
-    }
-  }
-  return out;
 }
 
 function chamferDistance(ink: Uint8Array, w: number, h: number) {
@@ -1963,140 +1937,708 @@ function paintSettledRope(ctx: CanvasRenderingContext2D, span: RopeSpan, alpha: 
   ctx.restore();
 }
 
-function strokeFlow(ink: Uint8Array, dist: Float32Array, w: number, h: number) {
-  const tx = new Float32Array(w * h);
-  const ty = new Float32Array(w * h);
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-      if (!ink[i]) continue;
-      const gx = dist[i + 1] - dist[i - 1];
-      const gy = dist[i + w] - dist[i - w];
-      const mag = Math.hypot(gx, gy) || 1;
-      tx[i] = -gy / mag;
-      ty[i] = gx / mag;
-    }
-  }
-  for (let pass = 0; pass < 5; pass++) {
-    for (let y = 1; y < h - 1; y++) {
-      for (let x = 1; x < w - 1; x++) {
-        const i = y * w + x;
-        if (!ink[i]) continue;
-        const left = ink[i - 1] ? i - 1 : ink[i - w] ? i - w : -1;
-        if (left >= 0 && tx[i] * tx[left] + ty[i] * ty[left] < 0) {
-          tx[i] = -tx[i];
-          ty[i] = -ty[i];
-        }
-      }
-    }
-  }
-  const along = new Float32Array(w * h);
-  along.fill(1e9);
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-      if (!ink[i]) continue;
-      const bx = Math.round(x - tx[i]);
-      const by = Math.round(y - ty[i]);
-      if (bx < 0 || by < 0 || bx >= w || by >= h || !ink[by * w + bx]) along[i] = 0;
-    }
-  }
-  for (let iter = 0; iter < Math.min(160, Math.max(w, h)); iter++) {
-    let changed = false;
-    for (let y = 1; y < h - 1; y++) {
-      for (let x = 1; x < w - 1; x++) {
-        const i = y * w + x;
-        if (!ink[i]) continue;
-        const bx = Math.round(x - tx[i]);
-        const by = Math.round(y - ty[i]);
-        if (bx < 0 || by < 0 || bx >= w || by >= h) continue;
-        const back = by * w + bx;
-        if (!ink[back] || along[back] > 1e8) continue;
-        const next = along[back] + Math.hypot(x - bx, y - by);
-        if (next + 0.05 < along[i]) {
-          along[i] = next;
-          changed = true;
-        }
-      }
-    }
-    if (!changed) break;
-  }
-  for (let i = 0; i < along.length; i++) if (along[i] > 1e8) along[i] = 0;
-  return along;
-}
+const ROPE_BULK = 1.24;
+const ROPE_LX = -0.22;
+const ROPE_LY = -0.7;
+const ROPE_LZ = 0.68;
+const ROPE_LIGHT = Math.hypot(ROPE_LX, ROPE_LY, ROPE_LZ);
 
-function shadeStamp(
+type RopeSeg = {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  r0: number;
+  r1: number;
+  s0: number;
+  s1: number;
+  tx: number;
+  ty: number;
+  nx: number;
+  ny: number;
+  len: number;
+  cap0: boolean;
+  cap1: boolean;
+  pitch: number;
+};
+
+function chainsForComponent(
   ink: Uint8Array,
   w: number,
   h: number,
-  color: string,
-  clothDark: boolean,
-  x: number,
-  y: number,
   pixel: number,
-): RopeStamp | null {
-  if (w < 2 || h < 2) return null;
+  originX: number,
+  originY: number,
+) {
+  const box = inkBounds(ink, w, h);
+  if (!box || w < 2 || h < 2) return [];
   const dist = chamferDistance(ink, w, h);
-  let maxD = 1;
-  for (let i = 0; i < dist.length; i++) {
-    if (ink[i] && dist[i] < 1e5 && dist[i] > maxD) maxD = dist[i];
+  const skel = ink.slice();
+  thinZhangSuen(skel, w, h);
+  const traced = traceSkeleton(skel, w, h)
+    .map((chain) => skeletonToWorld(chain, dist, w, h, pixel, originX, originY))
+    .filter((chain) => chain.pts.length >= 2);
+  const chains = trimJunctions(
+    suppressJointCaps(
+      weldChains(pruneSpurs(traced))
+        .map((chain) => finishChain(chain))
+        .filter((chain): chain is RopeChain => chain !== null),
+    ),
+  );
+  const span = Math.max(box.maxX - box.minX, box.maxY - box.minY) * pixel;
+  const longest = chains.reduce((max, chain) => Math.max(max, chainLength(chain.pts, chain.closed)), 0);
+  if (!chains.length || longest < Math.max(8, span * 0.62)) {
+    const blob = blobChain(box, pixel, originX, originY);
+    const finished = blob ? finishChain(blob) : null;
+    return finished ? [finished] : [];
   }
-  const [red, green, blue] = hexToRgb(color);
-  const flow = strokeFlow(ink, dist, w, h);
-  const pitch = Math.max(8, maxD * 0.82);
+  return chains;
+}
+
+function inkBounds(ink: Uint8Array, w: number, h: number) {
+  let minX = w;
+  let minY = h;
+  let maxX = 0;
+  let maxY = 0;
+  let area = 0;
+  for (let i = 0; i < ink.length; i++) {
+    if (!ink[i]) continue;
+    area++;
+    const x = i % w;
+    const y = (i / w) | 0;
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+  }
+  if (!area) return null;
+  return { minX, minY, maxX, maxY, area };
+}
+
+function skeletonToWorld(
+  chain: SatinPoly,
+  dist: Float32Array,
+  w: number,
+  h: number,
+  pixel: number,
+  originX: number,
+  originY: number,
+) {
+  const pts: Point[] = [];
+  const radii: number[] = [];
+  for (const point of chain.pts) {
+    const x = Math.round(point.x);
+    const y = Math.round(point.y);
+    if (x < 0 || y < 0 || x >= w || y >= h) continue;
+    const radius = dist[y * w + x];
+    if (!(radius > 0.35) || radius > 1e5) continue;
+    pts.push({ x: originX + (x + 0.5) * pixel, y: originY + (y + 0.5) * pixel });
+    radii.push(radius * pixel);
+  }
+  return { pts, radii, closed: chain.closed && pts.length >= 4 };
+}
+
+type RawChain = { pts: Point[]; radii: number[]; closed: boolean };
+
+function pruneSpurs(chains: RawChain[]) {
+  if (chains.length <= 1) return chains;
+  const lengths = chains.map((chain) => chainLength(chain.pts, chain.closed));
+  const longest = Math.max(...lengths);
+  const radius =
+    chains.reduce((sum, chain) => sum + (chain.radii[chain.radii.length >> 1] || 0), 0) /
+    chains.length;
+  return chains.filter(
+    (chain, index) => chain.closed || lengths[index] >= Math.max(longest * 0.2, radius * 3.2),
+  );
+}
+
+function weldChains(chains: RawChain[]) {
+  const closed: RawChain[] = [];
+  const open: RawChain[] = [];
+  for (const chain of chains) {
+    const next = closeSmallGap(chain);
+    if (next.closed) closed.push(next);
+    else open.push(next);
+  }
+  for (let guard = 0; guard < 48; guard++) {
+    let joined = false;
+    for (let i = 0; i < open.length && !joined; i++) {
+      for (let j = i + 1; j < open.length && !joined; j++) {
+        const next = joinChains(open[i], open[j]);
+        if (!next) continue;
+        open.splice(j, 1);
+        open.splice(i, 1);
+        if (next.closed) closed.push(next);
+        else open.push(next);
+        joined = true;
+      }
+    }
+    if (!joined) break;
+  }
+  return closed.concat(open);
+}
+
+function closeSmallGap(chain: RawChain): RawChain {
+  if (chain.closed || chain.pts.length < 12) return chain;
+  const start = chain.pts[0];
+  const end = chain.pts[chain.pts.length - 1];
+  const gap = Math.hypot(start.x - end.x, start.y - end.y);
+  const radius = ((chain.radii[0] || 8) + (chain.radii[chain.radii.length - 1] || 8)) / 2;
+  if (gap > Math.max(3.5, radius * 1.2)) return chain;
+  const heading = directionAt(chain.pts, false);
+  const toward = unit(start.x - end.x, start.y - end.y);
+  if (heading.x * toward.x + heading.y * toward.y < 0.05 && gap > radius * 0.4) return chain;
+  return { pts: chain.pts, radii: chain.radii, closed: true };
+}
+
+function joinChains(a: RawChain, b: RawChain): RawChain | null {
+  const radius =
+    ((a.radii[a.radii.length >> 1] || 8) + (b.radii[b.radii.length >> 1] || 8)) / 2;
+  const limit = Math.max(5, radius * 1.45);
+  const pairs: Array<[RawChain, RawChain]> = [
+    [a, b],
+    [a, reversedChain(b)],
+    [reversedChain(a), b],
+    [reversedChain(a), reversedChain(b)],
+  ];
+  let best: RawChain | null = null;
+  let bestGap = limit;
+  for (const [left, right] of pairs) {
+    const gap = Math.hypot(
+      left.pts[left.pts.length - 1].x - right.pts[0].x,
+      left.pts[left.pts.length - 1].y - right.pts[0].y,
+    );
+    if (gap > bestGap) continue;
+    const dirA = directionAt(left.pts, false);
+    const dirB = directionAt(right.pts, true);
+    if (dirA.x * dirB.x + dirA.y * dirB.y < 0.2 && gap > limit * 0.4) continue;
+    bestGap = gap;
+    best = {
+      pts: left.pts.concat(right.pts),
+      radii: left.radii.concat(right.radii),
+      closed: false,
+    };
+  }
+  return best ? closeSmallGap(best) : null;
+}
+
+function reversedChain(chain: RawChain): RawChain {
+  return { pts: chain.pts.slice().reverse(), radii: chain.radii.slice().reverse(), closed: false };
+}
+
+function directionAt(pts: Point[], atStart: boolean) {
+  if (pts.length < 2) return { x: 1, y: 0 };
+  if (atStart) {
+    const next = pts[Math.min(4, pts.length - 1)];
+    return unit(next.x - pts[0].x, next.y - pts[0].y);
+  }
+  const prev = pts[Math.max(0, pts.length - 5)];
+  const end = pts[pts.length - 1];
+  return unit(end.x - prev.x, end.y - prev.y);
+}
+
+function suppressJointCaps(chains: RopeChain[]) {
+  const hits = (point: Point, self: number) => {
+    for (let index = 0; index < chains.length; index++) {
+      if (index === self) continue;
+      const other = chains[index];
+      for (let i = 0; i < other.pts.length; i++) {
+        const radius = other.radii[Math.min(i, other.radii.length - 1)] || 8;
+        if (Math.hypot(other.pts[i].x - point.x, other.pts[i].y - point.y) < radius * 0.82) return true;
+      }
+    }
+    return false;
+  };
+  return chains.map((chain, index) => {
+    if (chain.closed) return { ...chain, capStart: false, capEnd: false };
+    return {
+      ...chain,
+      capStart: !hits(chain.pts[0], index),
+      capEnd: !hits(chain.pts[chain.pts.length - 1], index),
+    };
+  });
+}
+
+function trimJunctions(chains: RopeChain[]) {
+  const deepInside = (point: Point, self: number) => {
+    for (let index = 0; index < chains.length; index++) {
+      if (index === self) continue;
+      const other = chains[index];
+      for (let i = 0; i < other.pts.length; i++) {
+        const radius = other.radii[Math.min(i, other.radii.length - 1)] || 8;
+        if (Math.hypot(other.pts[i].x - point.x, other.pts[i].y - point.y) < radius * 0.42) return true;
+      }
+    }
+    return false;
+  };
+  return chains.map((chain, index) => {
+    if (chain.closed || chain.pts.length < 8) return chain;
+    let start = 0;
+    let end = chain.pts.length - 1;
+    while (start < end - 5 && deepInside(chain.pts[start], index)) start++;
+    while (end > start + 5 && deepInside(chain.pts[end], index)) end--;
+    start = Math.max(0, start - 1);
+    end = Math.min(chain.pts.length - 1, end + 1);
+    if (start === 0 && end === chain.pts.length - 1) return chain;
+    return { ...chain, pts: chain.pts.slice(start, end + 1), radii: chain.radii.slice(start, end + 1) };
+  });
+}
+
+function blobChain(
+  box: { minX: number; minY: number; maxX: number; maxY: number },
+  pixel: number,
+  originX: number,
+  originY: number,
+) {
+  const width = (box.maxX - box.minX + 1) * pixel;
+  const height = (box.maxY - box.minY + 1) * pixel;
+  const cx = originX + ((box.minX + box.maxX) / 2) * pixel;
+  const cy = originY + ((box.minY + box.maxY) / 2) * pixel;
+  const radius = (Math.min(width, height) * 0.46) / ROPE_BULK;
+  const span = Math.max(radius * 0.22, Math.abs(width - height) * 0.28);
+  const vertical = height >= width;
+  const pts = vertical
+    ? [
+        { x: cx, y: cy - span / 2 },
+        { x: cx, y: cy + span / 2 },
+      ]
+    : [
+        { x: cx - span / 2, y: cy },
+        { x: cx + span / 2, y: cy },
+      ];
+  return { pts, radii: [radius, radius], closed: false };
+}
+
+function finishChain(chain: { pts: Point[]; radii: number[]; closed: boolean }): RopeChain | null {
+  let pts = chain.pts;
+  let radii = chain.radii;
+  const closed = chain.closed && pts.length >= 4;
+  if (pts.length >= 4) {
+    const fine = resampleChain(pts, radii, closed, 1.7);
+    const relaxed = relaxChain(fine.pts, fine.radii, closed, 12);
+    pts = relaxed.pts;
+    radii = relaxed.radii;
+  }
+  if (pts.length < 2) return null;
+  const guess = radii.reduce((sum, radius) => sum + radius, 0) / radii.length;
+  const stepped = resampleChain(pts, radii, closed, Math.max(2.4, guess * ROPE_BULK * 0.2));
+  if (stepped.pts.length < 2) return null;
+  const norm = normalizeRadii(stepped.radii);
+  const length = chainLength(stepped.pts, closed);
+  return {
+    pts: stepped.pts,
+    radii: norm.radii,
+    closed,
+    pitch: pitchFor(length, norm.med, closed),
+    capStart: !closed,
+    capEnd: !closed,
+  };
+}
+
+function relaxChain(pts: Point[], radii: number[], closed: boolean, passes: number) {
+  let cur = pts;
+  let rad = radii;
+  for (let pass = 0; pass < passes; pass++) {
+    const nextP: Point[] = [];
+    const nextR: number[] = [];
+    const count = cur.length;
+    for (let i = 0; i < count; i++) {
+      if (!closed && (i === 0 || i === count - 1)) {
+        nextP.push(cur[i]);
+        nextR.push(rad[i]);
+        continue;
+      }
+      const prev = (i - 1 + count) % count;
+      const next = (i + 1) % count;
+      nextP.push({
+        x: cur[prev].x * 0.3 + cur[i].x * 0.4 + cur[next].x * 0.3,
+        y: cur[prev].y * 0.3 + cur[i].y * 0.4 + cur[next].y * 0.3,
+      });
+      nextR.push(rad[prev] * 0.3 + rad[i] * 0.4 + rad[next] * 0.3);
+    }
+    cur = nextP;
+    rad = nextR;
+  }
+  return { pts: cur, radii: rad };
+}
+
+function resampleChain(pts: Point[], radii: number[], closed: boolean, step: number) {
+  const seqP = closed ? pts.concat([pts[0]]) : pts.slice();
+  const seqR = closed ? radii.concat([radii[0]]) : radii.slice();
+  const outP: Point[] = [seqP[0]];
+  const outR: number[] = [seqR[0]];
+  let prev = seqP[0];
+  let prevR = seqR[0];
+  let acc = 0;
+  const spacing = Math.max(1, step);
+  for (let i = 1; i < seqP.length; i++) {
+    const next = seqP[i];
+    const nextR = seqR[i];
+    const seg = Math.hypot(next.x - prev.x, next.y - prev.y);
+    if (seg < 1e-5) continue;
+    let traveled = 0;
+    while (acc + (seg - traveled) >= spacing) {
+      const need = spacing - acc;
+      traveled += need;
+      const t = traveled / seg;
+      outP.push({
+        x: prev.x + (next.x - prev.x) * t,
+        y: prev.y + (next.y - prev.y) * t,
+      });
+      outR.push(prevR + (nextR - prevR) * t);
+      acc = 0;
+    }
+    acc += seg - traveled;
+    prev = next;
+    prevR = nextR;
+  }
+  if (!closed) {
+    const last = seqP[seqP.length - 1];
+    const end = outP[outP.length - 1];
+    if (Math.hypot(end.x - last.x, end.y - last.y) > spacing * 0.35) {
+      outP.push(last);
+      outR.push(seqR[seqR.length - 1]);
+    } else {
+      outP[outP.length - 1] = last;
+      outR[outR.length - 1] = seqR[seqR.length - 1];
+    }
+  } else if (outP.length > 2) {
+    const end = outP[outP.length - 1];
+    if (Math.hypot(end.x - seqP[0].x, end.y - seqP[0].y) < spacing * 0.45) {
+      outP.pop();
+      outR.pop();
+    }
+  }
+  return { pts: outP, radii: outR };
+}
+
+function normalizeRadii(radii: number[]) {
+  const sorted = radii.slice().sort((a, b) => a - b);
+  const med = (sorted[Math.floor(sorted.length * 0.62)] || radii[0] || 4) * ROPE_BULK;
+  return {
+    med,
+    radii: radii.map((radius) => {
+      const thickened = radius * ROPE_BULK;
+      return Math.max(med * 0.86, Math.min(med * 1.08, thickened));
+    }),
+  };
+}
+
+function pitchFor(length: number, radius: number, closed: boolean) {
+  let pitch = Math.max(14, radius * 4.05);
+  if (closed && length > pitch) {
+    const ridges = Math.max(5, Math.round(length / (pitch / 3)));
+    pitch = (length * 3) / ridges;
+  }
+  return pitch;
+}
+
+function chainLength(pts: Point[], closed: boolean) {
+  let length = polylineLength(pts);
+  if (closed && pts.length > 1) {
+    const a = pts[0];
+    const b = pts[pts.length - 1];
+    length += Math.hypot(a.x - b.x, a.y - b.y);
+  }
+  return length;
+}
+
+function longestChain(chains: RopeChain[]) {
+  let best = chains[0];
+  let bestLen = -1;
+  for (const chain of chains) {
+    const length = chainLength(chain.pts, chain.closed);
+    if (length > bestLen) {
+      best = chain;
+      bestLen = length;
+    }
+  }
+  return best;
+}
+
+function arcForChain(chain: RopeChain) {
+  const pts = chain.pts;
+  if (pts.length < 2) {
+    const only = pts[0] ?? { x: 0, y: 0 };
+    return [only, { x: only.x + 12, y: only.y - 8 }];
+  }
+  if (!chain.closed) return decimatePoints(pts, 18);
+  let start = 0;
+  for (let i = 1; i < pts.length; i++) if (pts[i].y < pts[start].y) start = i;
+  const ordered: Point[] = [];
+  for (let i = 0; i <= pts.length; i++) ordered.push(pts[(start + i) % pts.length]);
+  return decimatePoints(ordered, 18);
+}
+
+function decimatePoints(pts: Point[], step: number) {
+  if (pts.length < 3) return pts.map((point) => ({ x: point.x, y: point.y }));
+  const out: Point[] = [pts[0]];
+  let prev = pts[0];
+  for (let i = 1; i < pts.length - 1; i++) {
+    if (Math.hypot(pts[i].x - prev.x, pts[i].y - prev.y) >= step) {
+      out.push(pts[i]);
+      prev = pts[i];
+    }
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
+}
+
+function segmentsOf(chain: RopeChain) {
+  const segs: RopeSeg[] = [];
+  const count = chain.closed ? chain.pts.length : chain.pts.length - 1;
+  let distance = 0;
+  let prevNx = 0;
+  let prevNy = 0;
+  let hasPrev = false;
+  for (let i = 0; i < count; i++) {
+    const a = chain.pts[i];
+    const b = chain.pts[(i + 1) % chain.pts.length];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 0.08) continue;
+    const tx = dx / len;
+    const ty = dy / len;
+    let nx = -ty;
+    let ny = tx;
+    if (hasPrev && nx * prevNx + ny * prevNy < 0) {
+      nx = -nx;
+      ny = -ny;
+    }
+    prevNx = nx;
+    prevNy = ny;
+    hasPrev = true;
+    segs.push({
+      x0: a.x,
+      y0: a.y,
+      x1: b.x,
+      y1: b.y,
+      r0: chain.radii[Math.min(i, chain.radii.length - 1)],
+      r1: chain.radii[Math.min((i + 1) % chain.pts.length, chain.radii.length - 1)],
+      s0: distance,
+      s1: distance + len,
+      tx,
+      ty,
+      nx,
+      ny,
+      len,
+      cap0: false,
+      cap1: false,
+      pitch: chain.pitch,
+    });
+    distance += len;
+  }
+  if (!chain.closed && segs.length) {
+    segs[0].cap0 = chain.capStart;
+    segs[segs.length - 1].cap1 = chain.capEnd;
+  }
+  return segs;
+}
+
+function plyLift(
+  offset: number,
+  along: number,
+  radius: number,
+  nx: number,
+  ny: number,
+  pitch: number,
+  lx: number,
+  ly: number,
+  lz: number,
+) {
+  const strandR = radius * 0.58;
+  const orbit = radius * 0.4;
+  const phase = (along / Math.max(8, pitch)) * Math.PI * 2;
+  let bestZ = -1e9;
+  let nd = 0;
+  let nz = 1;
+  let strand = 0;
+  let covered = false;
+  for (let k = 0; k < 3; k++) {
+    const theta = phase + (k * Math.PI * 2) / 3;
+    const cx = Math.cos(theta) * orbit;
+    const cz = Math.sin(theta) * orbit;
+    const dd = offset - cx;
+    if (Math.abs(dd) > strandR) continue;
+    const zLocal = Math.sqrt(Math.max(0, strandR * strandR - dd * dd));
+    const z = cz + zLocal;
+    if (z > bestZ) {
+      bestZ = z;
+      nd = dd / strandR;
+      nz = zLocal / strandR;
+      strand = k;
+      covered = true;
+    }
+  }
+  if (!covered) return -0.16;
+  const light = Math.max(0, nd * nx * lx + nd * ny * ly + nz * lz);
+  const fiber = Math.sin(along / Math.max(4.5, strandR) + strand * 1.7) * 0.028;
+  const below = Math.max(0, (offset * ny) / radius);
+  let lift = -0.24 + light * 0.62 - nd * nd * 0.14 - below * 0.05 + fiber;
+  if (light > 0.72 && Math.abs(nd) < 0.22) lift += (light - 0.72) * 0.2;
+  return lift;
+}
+
+function rasterRopeStamp(chains: RopeChain[], color: string, clothDark: boolean): RopeStamp | null {
+  const segs = chains.flatMap(segmentsOf);
+  if (!segs.length) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxR = 1;
+  for (const seg of segs) {
+    maxR = Math.max(maxR, seg.r0, seg.r1);
+    const reach = Math.max(seg.r0, seg.r1) + 2;
+    minX = Math.min(minX, seg.x0 - reach, seg.x1 - reach);
+    minY = Math.min(minY, seg.y0 - reach, seg.y1 - reach);
+    maxX = Math.max(maxX, seg.x0 + reach, seg.x1 + reach);
+    maxY = Math.max(maxY, seg.y0 + reach, seg.y1 + reach);
+  }
+  const worldW = Math.max(1, maxX - minX);
+  const worldH = Math.max(1, maxY - minY);
+  let ss = 2;
+  while (worldW * worldH * ss * ss > 1_700_000 && ss > 1) ss *= 0.8;
+  const iw = Math.max(1, Math.ceil(worldW * ss));
+  const ih = Math.max(1, Math.ceil(worldH * ss));
   const yarn = document.createElement("canvas");
-  yarn.width = w;
-  yarn.height = h;
-  const yg = yarn.getContext("2d");
+  yarn.width = iw;
+  yarn.height = ih;
+  const yg = yarn.getContext("2d", { willReadFrequently: true });
   if (!yg) return null;
-  const image = yg.createImageData(w, h);
+  const image = yg.createImageData(iw, ih);
   const data = image.data;
-  for (let yy = 1; yy < h - 1; yy++) {
-    for (let xx = 1; xx < w - 1; xx++) {
-      const i = yy * w + xx;
-      if (!ink[i]) continue;
-      const d = dist[i];
-      if (!(d > 0) || d > 1e5) continue;
-      const along = flow[i];
-      const crown = Math.min(1, d / Math.max(2.6, maxD * 0.48));
-      const phase = (along / pitch) * Math.PI * 2;
-      const twist = Math.sin(phase);
-      let lift = -0.52 + Math.sin(crown * Math.PI * 0.5) * 0.74 + twist * 0.42 * (0.35 + crown);
-      if (d < 1.8) lift -= 0.2;
-      lift = Math.max(-0.64, Math.min(0.5, lift));
+  const [red, green, blue] = hexToRgb(color);
+  const cell = Math.max(8, maxR);
+  const grid = new Map<string, number[]>();
+  for (let index = 0; index < segs.length; index++) {
+    const seg = segs[index];
+    const reach = Math.max(seg.r0, seg.r1) * 1.12 + 2;
+    const xStart = Math.floor((Math.min(seg.x0, seg.x1) - reach) / cell);
+    const xEnd = Math.floor((Math.max(seg.x0, seg.x1) + reach) / cell);
+    const yStart = Math.floor((Math.min(seg.y0, seg.y1) - reach) / cell);
+    const yEnd = Math.floor((Math.max(seg.y0, seg.y1) + reach) / cell);
+    for (let gy = yStart; gy <= yEnd; gy++) {
+      for (let gx = xStart; gx <= xEnd; gx++) {
+        const key = `${gx},${gy}`;
+        const bucket = grid.get(key);
+        if (bucket) bucket.push(index);
+        else grid.set(key, [index]);
+      }
+    }
+  }
+
+  const lx = ROPE_LX / ROPE_LIGHT;
+  const ly = ROPE_LY / ROPE_LIGHT;
+  const lz = ROPE_LZ / ROPE_LIGHT;
+
+  for (let iy = 0; iy < ih; iy++) {
+    const y = minY + (iy + 0.5) / ss;
+    const gy = Math.floor(y / cell);
+    for (let ix = 0; ix < iw; ix++) {
+      const x = minX + (ix + 0.5) / ss;
+      const bucket = grid.get(`${Math.floor(x / cell)},${gy}`);
+      if (!bucket) continue;
+
+      let bestD2 = 1e12;
+      let secondD2 = 1e12;
+      let bestLift = -0.16;
+      let secondLift = -0.16;
+      let radius = 0;
+      let hit = false;
+      for (let b = 0; b < bucket.length; b++) {
+        const seg = segs[bucket[b]];
+        const vx = x - seg.x0;
+        const vy = y - seg.y0;
+        const axial = vx * seg.tx + vy * seg.ty;
+        // Clamp onto the segment, including the round cap. Butt ends leave a
+        // notch on the outside of every bend, which reads as a comb.
+        const clamped = axial < 0 ? 0 : axial > seg.len ? seg.len : axial;
+        const cx = seg.x0 + seg.tx * clamped;
+        const cy = seg.y0 + seg.ty * clamped;
+        const dx = x - cx;
+        const dy = y - cy;
+        const d2 = dx * dx + dy * dy;
+        const t = seg.len > 0 ? clamped / seg.len : 0;
+        const localR = seg.r0 + (seg.r1 - seg.r0) * t;
+        if (d2 > localR * localR * 1.2) continue;
+        const liftHere = plyLift(
+          dx * seg.nx + dy * seg.ny,
+          seg.s0 + (seg.s1 - seg.s0) * t,
+          localR,
+          seg.nx,
+          seg.ny,
+          seg.pitch,
+          lx,
+          ly,
+          lz,
+        );
+        if (d2 < bestD2) {
+          secondD2 = bestD2;
+          secondLift = bestLift;
+          bestD2 = d2;
+          bestLift = liftHere;
+          radius = localR;
+          hit = true;
+        } else if (d2 < secondD2) {
+          secondD2 = d2;
+          secondLift = liftHere;
+        }
+      }
+      if (!hit || !(radius > 0.5)) continue;
+
+      const perp = Math.sqrt(bestD2);
+      const tube = radius;
+      if (perp > tube + 1.15 / ss) continue;
+      let lift = bestLift;
+      if (secondD2 < 1e11) {
+        const gap = Math.sqrt(secondD2) - perp;
+        const band = tube * 0.42;
+        if (gap >= 0 && gap < band) {
+          const mix = (1 - gap / band) * 0.45;
+          lift = bestLift * (1 - mix) + secondLift * mix;
+        }
+      }
+      // The outer half of the rope settles to one edge color, so helix highlights
+      // cannot break the silhouette into a comb.
+      const rim = smoothstep((perp / tube - 0.5) / 0.5);
+      lift = lift * (1 - rim) + -0.16 * rim;
+      const alpha = Math.max(0, Math.min(1, (tube - perp) * ss + 0.22));
+      if (alpha < 0.01) continue;
       const [rr, gg, bb] = tone(red, green, blue, lift);
-      const o = i * 4;
+      const o = (iy * iw + ix) * 4;
       data[o] = rr;
       data[o + 1] = gg;
       data[o + 2] = bb;
-      data[o + 3] = d < 1.2 ? Math.round((d / 1.2) * 255) : 255;
+      data[o + 3] = Math.round(alpha * 255);
     }
   }
   yg.putImageData(image, 0, 0);
 
+  const pad = Math.ceil(maxR * ss * 0.85 + 6);
   const canvas = document.createElement("canvas");
-  const pad = Math.ceil(14 / Math.max(pixel, 0.4));
-  canvas.width = w + pad * 2;
-  canvas.height = h + pad * 2;
+  canvas.width = iw + pad * 2;
+  canvas.height = ih + pad * 2;
   const g = canvas.getContext("2d");
   if (!g) return null;
-  const drop = Math.max(2, Math.round(7 / Math.max(pixel, 0.4)));
-  const blur = Math.max(1.5, 6 / Math.max(pixel, 0.4));
+  const drop = Math.max(1.5, maxR * ss * 0.36);
+  const blur = Math.max(1.1, maxR * ss * 0.16);
   g.save();
-  g.filter = `blur(${blur}px)`;
-  g.globalAlpha = clothDark ? 0.45 : 0.38;
+  g.filter = `blur(${blur.toFixed(2)}px)`;
   g.drawImage(yarn, pad, pad + drop);
   g.restore();
-  g.save();
-  g.filter = "blur(1.15px)";
+  g.globalCompositeOperation = "source-in";
+  g.fillStyle = clothDark ? "rgba(0, 0, 0, 0.72)" : "rgba(48, 20, 14, 0.66)";
+  g.fillRect(0, 0, canvas.width, canvas.height);
+  g.globalCompositeOperation = "source-over";
   g.drawImage(yarn, pad, pad);
-  g.restore();
   return {
     canvas,
-    x: x - pad * pixel,
-    y: y - pad * pixel,
-    w: (w + pad * 2) * pixel,
-    h: (h + pad * 2) * pixel,
+    x: minX - pad / ss,
+    y: minY - pad / ss,
+    w: canvas.width / ss,
+    h: canvas.height / ss,
   };
 }
 

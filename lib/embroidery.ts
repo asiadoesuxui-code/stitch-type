@@ -1939,7 +1939,7 @@ function paintSettledRope(ctx: CanvasRenderingContext2D, span: RopeSpan, alpha: 
   ctx.restore();
 }
 
-const ROPE_BULK = 1.98;
+const ROPE_BULK = 1.64;
 
 type RopeSeg = {
   x0: number;
@@ -2903,34 +2903,105 @@ function ropeNoise(x: number, y: number) {
   return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
 }
 
+let yarnTile: { w: number; h: number; data: Float32Array } | null = null;
+
+function blurWrap(src: Float32Array, w: number, h: number, radius: number) {
+  const tmp = new Float32Array(src.length);
+  const dst = new Float32Array(src.length);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      let count = 0;
+      for (let k = -radius; k <= radius; k++) {
+        sum += src[y * w + ((x + k + w) % w)];
+        count++;
+      }
+      tmp[y * w + x] = sum / count;
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      let count = 0;
+      for (let k = -radius; k <= radius; k++) {
+        sum += tmp[((y + k + h) % h) * w + x];
+        count++;
+      }
+      dst[y * w + x] = sum / count;
+    }
+  }
+  return dst;
+}
+
+function yarnTileData() {
+  if (yarnTile) return yarnTile;
+  const w = 180;
+  const h = 96;
+  const raw = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const u = x / w;
+      let plyDist = 1;
+      let center = 0;
+      for (let ply = 0; ply < 3; ply++) {
+        let dist = Math.abs(u - ply / 3);
+        dist = Math.min(dist, 1 - dist);
+        if (dist < plyDist) {
+          plyDist = dist;
+          center = ply / 3;
+        }
+      }
+      const across = plyDist / (1 / 6);
+      const strand = Math.exp(-across * across * 1.8);
+      const local = (u - center + 1) % 1;
+      const fiberPhase = local * 42 + Math.sin((y / h) * Math.PI * 2 + local * 9) * 0.85;
+      const band = Math.abs(fiberPhase - Math.round(fiberPhase));
+      const hair = Math.exp(-band * band * 22);
+      const gy = Math.sin((y / h) * Math.PI * 2);
+      const gx = Math.cos((y / h) * Math.PI * 2);
+      const grain = ropeNoise(x * 0.15 + local * 3, gy * 1.6 + gx * 0.35);
+      let value = (strand - 0.4) * 0.2;
+      value += (hair - 0.28) * 0.16 * (0.4 + 0.6 * strand);
+      value += (grain - 0.5) * 0.07;
+      value -= Math.pow(Math.min(1, across), 1.45) * 0.11;
+      raw[y * w + x] = value;
+    }
+  }
+  yarnTile = { w, h, data: blurWrap(raw, w, h, 1) };
+  return yarnTile;
+}
+
+function sampleYarn(u: number, v: number) {
+  const tile = yarnTileData();
+  const x = (((u % 1) + 1) % 1) * tile.w;
+  const y = (((v % 1) + 1) % 1) * tile.h;
+  const x0 = Math.floor(x) % tile.w;
+  const y0 = Math.floor(y) % tile.h;
+  const x1 = (x0 + 1) % tile.w;
+  const y1 = (y0 + 1) % tile.h;
+  const fx = x - Math.floor(x);
+  const fy = y - Math.floor(y);
+  const a = tile.data[y0 * tile.w + x0];
+  const b = tile.data[y0 * tile.w + x1];
+  const c = tile.data[y1 * tile.w + x0];
+  const d = tile.data[y1 * tile.w + x1];
+  return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
+}
+
 function sweepLift(lateral: number, along: number, radius: number, pitch: number, plyGain = 1) {
   const span = Math.max(radius, 0.001);
   const u = Math.max(-1, Math.min(1, lateral / span));
   const facing = Math.sqrt(Math.max(0, 1 - u * u));
   const angle = Math.atan2(u, facing);
-  const twist = (along / Math.max(10, pitch)) * Math.PI * 2;
-  let best = -2;
-  let which = 0;
-  for (let ply = 0; ply < 3; ply++) {
-    const cosine = Math.cos(angle + twist + (ply * Math.PI * 2) / 3);
-    if (cosine > best) {
-      best = cosine;
-      which = ply;
-    }
-  }
-  const delta = Math.acos(Math.max(-1, Math.min(1, best)));
-  const across = Math.min(1, delta / (Math.PI / 3));
-  const strand = Math.sqrt(Math.max(0, 1 - across * across));
-  const gain = 0.5 + 0.5 * plyGain;
-  const alongHelix = along / span + which * 5.1;
-  const fiber =
-    ropeNoise(alongHelix * 1.15, across * 14 + which * 2.3) * 0.58 +
-    ropeNoise(alongHelix * 2.7 + 1.8, across * 26 + which) * 0.42;
-  const streaks = (fiber - 0.5) * 0.28 * (0.3 + 0.7 * strand) * (0.4 + 0.6 * facing);
-  const groove = Math.pow(across, 1.35);
-  const body = -0.38 + strand * 0.48 * (0.28 + 0.72 * facing);
-  const spec = Math.pow(strand, 5) * facing * facing * 0.4 * gain;
-  return body - groove * 0.3 * gain + spec + streaks;
+  const wobble = Math.sin(along / (span * 9)) * 0.18;
+  const twist = (along / Math.max(14, pitch)) * Math.PI * 2 + wobble;
+  const yarn = sampleYarn((angle + twist) / (Math.PI * 2), along / (Math.max(14, pitch) * 1.6));
+  const gain = 0.75 + 0.25 * plyGain;
+  const round = -0.05 + facing * 0.2;
+  const crown = Math.pow(facing, 1.6) * 0.11;
+  const lift = round + crown + yarn * 1.65 * (0.4 + 0.6 * facing) * gain;
+  if (lift <= 0.3) return Math.max(-0.4, lift);
+  return 0.3 + 0.09 * (1 - Math.exp(-(lift - 0.3) * 3.2));
 }
 
 type RopeSweep = {
@@ -2984,20 +3055,47 @@ function buildSweep(chain: RopeChain): RopeSweep | null {
   const ny = new Float32Array(count);
   const arc = new Float32Array(count);
   for (let i = 0; i < count; i++) {
-    const prev = pts[chain.closed ? (i - 2 + count) % count : Math.max(0, i - 2)];
-    const next = pts[chain.closed ? (i + 2) % count : Math.min(count - 1, i + 2)];
+    const prev = pts[chain.closed ? (i - 6 + count) % count : Math.max(0, i - 6)];
+    const next = pts[chain.closed ? (i + 6) % count : Math.min(count - 1, i + 6)];
     const dir = unit(next.x - prev.x, next.y - prev.y);
     tx[i] = dir.x;
     ty[i] = dir.y;
-    let px = -dir.y;
-    let py = dir.x;
+    if (i > 0) arc[i] = arc[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+  }
+  for (let pass = 0; pass < 3; pass++) {
+    const sx = new Float32Array(count);
+    const sy = new Float32Array(count);
+    for (let i = 0; i < count; i++) {
+      let ax = 0;
+      let ay = 0;
+      for (let k = -4; k <= 4; k++) {
+        const j = chain.closed ? (i + k + count * 2) % count : Math.max(0, Math.min(count - 1, i + k));
+        const weight = k === 0 ? 3 : 1;
+        let dx = tx[j];
+        let dy = ty[j];
+        if (dx * tx[i] + dy * ty[i] < 0) {
+          dx = -dx;
+          dy = -dy;
+        }
+        ax += dx * weight;
+        ay += dy * weight;
+      }
+      const len = Math.hypot(ax, ay) || 1;
+      sx[i] = ax / len;
+      sy[i] = ay / len;
+    }
+    tx.set(sx);
+    ty.set(sy);
+  }
+  for (let i = 0; i < count; i++) {
+    let px = -ty[i];
+    let py = tx[i];
     if (i > 0 && px * nx[i - 1] + py * ny[i - 1] < 0) {
       px = -px;
       py = -py;
     }
     nx[i] = px;
     ny[i] = py;
-    if (i > 0) arc[i] = arc[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
   }
   return {
     x: Float32Array.from(pts, (point) => point.x),
@@ -3099,7 +3197,7 @@ function rasterRopeStamp(chains: RopeChain[], color: string, clothDark: boolean)
     if (sweep.disk) {
       const dx = x - sweep.x[0];
       const dy = y - sweep.y[0];
-      return { dist: Math.hypot(dx, dy), lateral: 0, along: 0, radius: sweep.r, ply: 1 };
+      return { dist: Math.hypot(dx, dy), lateral: dx, along: dy, radius: sweep.r, ply: 1 };
     }
     const gx = Math.floor(x / cell);
     const gy = Math.floor(y / cell);
@@ -3189,9 +3287,9 @@ function rasterRopeStamp(chains: RopeChain[], color: string, clothDark: boolean)
       const shade = (hit: SweepHit) => {
         if (hit.disk) {
           const facing = Math.sqrt(Math.max(0, 1 - (hit.dist / hit.radius) ** 2));
-          const scale = Math.max(3.5, hit.radius * 0.22);
-          const fiber = ropeNoise(x / scale, y / (scale * 1.8)) * 0.62 + ropeNoise(x / (scale * 0.42), y / scale) * 0.38;
-          return -0.34 + facing * 0.5 + Math.pow(facing, 8) * 0.18 + (fiber - 0.5) * 0.16 * facing;
+          const ang = Math.atan2(hit.along, hit.lateral || 0.0001);
+          const yarn = sampleYarn(ang / (Math.PI * 8), 0.4 + hit.dist / (hit.radius * 5));
+          return -0.08 + facing * 0.26 + Math.pow(facing, 2) * 0.07 + yarn * 0.4 * facing;
         }
         return sweepLift(hit.lateral, hit.along, hit.radius, hit.pitch, hit.ply);
       };
@@ -3230,14 +3328,14 @@ function rasterRopeStamp(chains: RopeChain[], color: string, clothDark: boolean)
   canvas.height = ih + pad * 2;
   const g = canvas.getContext("2d");
   if (!g) return null;
-  const drop = Math.max(1.2, maxR * ss * 0.065);
-  const blur = Math.max(0.55, maxR * ss * 0.026);
+  const drop = Math.max(1.5, maxR * ss * 0.1);
+  const blur = Math.max(1, maxR * ss * 0.07);
   g.save();
   g.filter = `blur(${blur.toFixed(2)}px)`;
   g.drawImage(mask, pad, pad + drop);
   g.restore();
   g.globalCompositeOperation = "source-in";
-  g.fillStyle = clothDark ? "rgba(0,0,0,0.5)" : "rgba(36, 14, 10, 0.5)";
+  g.fillStyle = clothDark ? "rgba(0,0,0,0.42)" : "rgba(48, 22, 16, 0.4)";
   g.fillRect(0, 0, canvas.width, canvas.height);
   g.globalCompositeOperation = "destination-out";
   g.drawImage(mask, pad, pad);

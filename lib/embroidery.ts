@@ -2917,13 +2917,16 @@ function tangentYarn(
   rim: number,
 ): [number, number, number] {
   const alongN = along / Math.max(5, radius);
-  const warp = (ropeNoise(alongN * 0.12 + which * 1.7, 0.4) - 0.5) * 0.85;
-  const across = around * 9.2 + alongN * 6.6 + warp + which * 1.4;
-  const hair = Math.sin(across);
-  const life = 0.58 + 0.42 * ropeNoise(alongN * 0.4 + which * 0.7, across * 0.07);
-  const ridge = Math.pow(Math.max(0, hair), 1.55) * life;
-  const form = 0.72 + light * 0.36;
-  const tone = form * (0.9 + ridge * 0.2 * (0.35 + 0.65 * rim));
+  const warp = (ropeNoise(alongN * 0.07 + which * 1.4, around * 0.2) - 0.5) * 2.6;
+  const across = around * 7.4 + alongN * 5.1 + warp + which * 1.6;
+  const thick = Math.sin(across);
+  const fine = Math.sin(across * 2.23 + 0.8);
+  const broken = ropeNoise(alongN * 0.48 + which * 0.6, across * 0.09);
+  const pill = ropeNoise(alongN * 1.15 + 5.2, around * 2.1 + which * 3);
+  const strand = Math.pow(Math.max(0, thick), 1.15) * (0.28 + 0.72 * broken) + Math.pow(Math.max(0, fine), 1.7) * 0.22;
+  const tuft = pill > 0.78 ? (pill - 0.78) * 2.2 : 0;
+  const form = 0.8 + light * 0.24;
+  const tone = form * (0.9 + (strand * 0.22 + tuft * 0.16) * rim);
   return [clamp(YARN_MID[0] * tone), clamp(YARN_MID[1] * tone), clamp(YARN_MID[2] * tone)];
 }
 
@@ -2937,11 +2940,11 @@ function ropeSurface(
   length: number,
 ): PlyShade {
   const tip = Math.min(along, Math.max(0, length - along));
-  const taperLen = radius * 1.8;
+  const taperLen = radius * 0.7;
   const taper = tip < taperLen ? smoothstep(tip / taperLen) : 1;
-  const bulk = 0.9 + 0.1 * taper;
-  const plyR = radius * (0.56 + 0.16 * (1 - taper)) * bulk;
-  const orbit = Math.max(0, (radius - radius * 0.56) * bulk * taper);
+  const scale = 0.97 + 0.03 * taper;
+  const plyR = radius * 0.56 * scale;
+  const orbit = Math.max(0.2, (radius - radius * 0.56) * scale);
   const span = Math.max(pitch, radius * 4.8);
   const wobble = Math.sin(along / (radius * 18)) * 0.16;
   const phase = (along / span) * Math.PI * 2 + wobble;
@@ -2972,9 +2975,33 @@ function ropeSurface(
     } else if (z > secondZ) secondZ = z;
   }
   if (overhang > 0) {
-    const capR = Math.max(1.1, plyR + orbit);
-    const cap = Math.sqrt(Math.max(0, capR * capR - overhang * overhang));
-    signed = Math.min(signed, cap - Math.abs(lateral));
+    let capSigned = -1e9;
+    let capDx = 0;
+    let capNz = 1;
+    let capWhich = 0;
+    for (let ply = 0; ply < 3; ply++) {
+      const ang = phase + (ply * Math.PI * 2) / 3;
+      const cx = Math.cos(ang) * orbit;
+      const radial = plyR * plyR - overhang * overhang;
+      if (radial <= 0) continue;
+      const reach = Math.sqrt(radial) - Math.abs(lateral - cx);
+      if (reach > capSigned) {
+        capSigned = reach;
+        capDx = lateral - cx;
+        capNz = Math.sqrt(radial);
+        capWhich = ply;
+      }
+    }
+    if (capSigned > -1e8) {
+      signed = signed > 0 ? Math.min(signed, capSigned) : capSigned;
+      if (bestZ < -1e8 || capSigned <= signed + 0.2) {
+        bestZ = 0;
+        bestDx = capDx;
+        bestNz = Math.max(0.35, capNz);
+        bestR = plyR;
+        which = capWhich;
+      }
+    }
   }
   if (bestZ < -1e8) return { r: 0, g: 0, b: 0, cover: signed };
   const nx = bestDx / bestR;
@@ -2984,7 +3011,7 @@ function ropeSurface(
   const crevice = secondZ > -1e8 ? Math.max(0, 1 - (bestZ - secondZ) / (bestR * 0.85)) : 0;
   const light = Math.max(0, Math.min(1, wrap * (1 - crevice * 0.28 * (0.45 + 0.55 * plyGain))));
   const around = Math.atan2(bestDx, bestNz);
-  const rim = Math.min(1, Math.max(0, signed / Math.max(1.6, bestR * 0.5)));
+  const rim = Math.min(1, Math.max(0, signed / Math.max(1.8, bestR * 0.42)));
   const [r, g, b] = tangentYarn(along + which * radius * 3.1, around, which, bestR, light, rim);
   return { r, g, b, cover: signed };
 }
@@ -3362,14 +3389,11 @@ function rasterRopeStamp(chains: RopeChain[], color: string, clothDark: boolean)
         cb = tube.b;
         cover = tube.cover;
       }
-      const fringe = Math.max(2.2, primary.radius * 0.2);
-      if (cover < -fringe) continue;
-      let alpha = 1;
-      if (cover < fringe) {
-        const wobble = (ropeNoise(x * 0.07, y * 0.07) - 0.5) * fringe * 0.28;
-        alpha = smoothstep((cover + fringe * 0.2 + wobble) / fringe);
-      }
-      if (alpha < 0.03) continue;
+      const tuftNoise = ropeNoise(x * 0.55 + 2.2, y * 0.55);
+      const tuft = tuftNoise > 0.74 ? (tuftNoise - 0.74) * 2.4 : 0;
+      const wobble = (ropeNoise(x * 0.18, y * 0.18) - 0.5) * 0.45;
+      const edge = cover + wobble + tuft;
+      if (edge < 0.4) continue;
       const tint = 0.05;
       const rr = clamp(cr * (1 - tint) + red * tint);
       const gg = clamp(cg * (1 - tint) + green * tint);
@@ -3378,13 +3402,11 @@ function rasterRopeStamp(chains: RopeChain[], color: string, clothDark: boolean)
       data[o] = rr;
       data[o + 1] = gg;
       data[o + 2] = bb;
-      data[o + 3] = Math.round(alpha * 255);
-      if (cover >= 0) {
-        maskData[o] = 255;
-        maskData[o + 1] = 255;
-        maskData[o + 2] = 255;
-        maskData[o + 3] = 255;
-      }
+      data[o + 3] = 255;
+      maskData[o] = 255;
+      maskData[o + 1] = 255;
+      maskData[o + 2] = 255;
+      maskData[o + 3] = 255;
     }
   }
   for (let pass = 0; pass < 2; pass++) {

@@ -78,10 +78,15 @@ export function Studio() {
 
   useEffect(() => {
     let cancel = false;
-    const family = fontFamily();
-    document.fonts.load(`600 120px ${family}`).then(() => {
-      if (!cancel) setFontReady(true);
-    });
+    const family = primaryFontFamily();
+    document.fonts.load(`600 120px ${family}`).then(
+      () => {
+        if (!cancel) setFontReady(true);
+      },
+      () => {
+        if (!cancel) setFontReady(true);
+      },
+    );
     wordRef.current?.focus();
     return () => {
       cancel = true;
@@ -443,23 +448,21 @@ function StitchIcon({ id }: { id: StitchId }) {
     );
   }
 
-  if (id === "knot") {
+  if (id === "rope") {
     return (
       <svg {...common}>
         <path
-          d="M6.2 9h2.1M15.6 9h2.1M25 9h2.1"
+          d="M3 6.4c3.1 0 4.3 5.1 7.4 5.1s4.3-5.1 7.4-5.1 4.3 5.1 7.4 5.1 4.2-5.1 7.4-5.1"
           stroke="currentColor"
-          strokeWidth="1.25"
+          strokeWidth="1.7"
           strokeLinecap="round"
         />
-        {[9.2, 18.6, 28].map((x) => (
-          <path
-            key={x}
-            d={`M${x - 2.15} 9c.35-2.15 3.95-2.15 4.3 0-.35 2.15-3.95 2.15-4.3 0z`}
-            stroke="currentColor"
-            strokeWidth="1.25"
-          />
-        ))}
+        <path
+          d="M3 11.6c3.1 0 4.3-5.1 7.4-5.1s4.3 5.1 7.4 5.1 4.3-5.1 7.4-5.1 4.2 5.1 7.4 5.1"
+          stroke="currentColor"
+          strokeWidth="1.7"
+          strokeLinecap="round"
+        />
       </svg>
     );
   }
@@ -494,6 +497,13 @@ function fontFamily() {
     .getPropertyValue("--font-display")
     .trim();
   return family || "Georgia, serif";
+}
+
+function primaryFontFamily() {
+  // The display variable is a family list. fonts.load rejects the whole list
+  // when the local() fallback face is missing, which left the cloth blank.
+  const first = fontFamily().split(",")[0]?.trim();
+  return first || "Georgia";
 }
 
 function relativeLuminance(hex: string) {
